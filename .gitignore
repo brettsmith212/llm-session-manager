@@ -1,0 +1,24 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+go.work
+go.work.sum
+
+# Local binary builds
+llmux
+/llmux
+
+# Nix build result symlinks
+result
+result-*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

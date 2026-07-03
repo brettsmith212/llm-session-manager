@@ -1,0 +1,8 @@
+{
+  "name": "llm-session-manager",
+  "description": "Track LLM session state (working/idle/waiting) on tmux sessions for llmux",
+  "version": "1.0.0",
+  "author": {
+    "name": "brettsmith"
+  }
+}

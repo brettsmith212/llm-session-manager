@@ -1,0 +1,61 @@
+{
+  "description": "Push Claude Code lifecycle events to llmux tmux session state",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "async": true }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "async": true }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+        ]
+      }
+    ]
+  }
+}
