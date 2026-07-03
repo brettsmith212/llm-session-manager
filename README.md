@@ -47,6 +47,30 @@ llmux list                         # list sessions (used by the picker)
 llmux state <working|waiting|idle> # update session state from a hook
 ```
 
+## Build without Nix
+
+Prereqs: Go 1.25+ (only external dep is `golang.org/x/term`).
+
+```bash
+git clone https://github.com/brettsmith212/llm-session-manager
+cd llm-session-manager
+go build -o llmux .
+mv llmux ~/.local/bin/   # or anywhere on $PATH
+```
+
+Cross-compile from any host:
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o llmux-darwin-arm64 .
+GOOS=linux  GOARCH=amd64 go build -o llmux-linux-amd64 .
+```
+
+For the Claude Code plugin, just copy the directory:
+
+```bash
+cp -r plugins/claude ~/.claude/plugins/llm-session-manager
+```
+
 ## License
 
 MIT
