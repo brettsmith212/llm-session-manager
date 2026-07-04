@@ -45,14 +45,23 @@ func Add(cwd, origin string) error {
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", abs); err != nil {
 		return err
 	}
-	if origin != "" {
-		if err := tmux.SetSessionOption(sessionName, "@llm_origin", origin); err != nil {
+
+	originSession := origin
+	if originSession == "" || !tmux.HasSession(originSession) {
+		originSession = tmux.GetParentSession()
+	}
+	if originSession != "" {
+		if err := tmux.SetSessionOption(sessionName, "@llm_origin", originSession); err != nil {
 			return err
 		}
 	}
 
 	_ = tmux.SetWindowOption(windowID, "@llm_opencode", "1")
 	_ = tmux.SetWindowOption(windowID, "@llm_path", abs)
+
+	if originSession != "" && originSession != sessionName {
+		_ = tmux.EnsureOriginWindow(originSession, abs, "")
+	}
 
 	attachCmd := tmux.AttachCommand(sessionName, false) + " \\; select-window -t " + tmux.ShellQuote(windowID)
 	return tmux.DisplayPopup(tmux.DisplayPopupOptions{

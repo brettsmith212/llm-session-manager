@@ -316,9 +316,15 @@ func (p *picker) activateSession() {
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
 
-	origin := tmux.GetSessionOption(session.Name, "@llm_origin")
-	if origin != "" && p.parent != "" {
-		_ = tmux.RunRaw([]string{"switch-client", "-c", p.parent, "-t", origin})
+	origin := session.Origin
+	if origin == "" {
+		origin = tmux.GetSessionOption(session.Name, "@llm_origin")
+	}
+	if origin == "" {
+		origin = tmux.GetParentSession()
+	}
+	if origin != "" && origin != session.Name {
+		_ = tmux.EnsureOriginWindow(origin, session.Path, p.parent)
 	}
 
 	if p.parent != "" {
@@ -446,10 +452,8 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 func (p *picker) openCreatePopup() {
 	list := p.filtered()
 	defaultPath := ""
-	origin := ""
 	if p.selectedIndex < len(list) {
 		defaultPath = list[p.selectedIndex].Path
-		origin = tmux.GetSessionOption(list[p.selectedIndex].Name, "@llm_origin")
 	}
 	if defaultPath == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -464,7 +468,7 @@ func (p *picker) openCreatePopup() {
 		"-w", width,
 		"-h", height,
 		"-E",
-		binaryPath()+" prompt "+tmux.ShellQuote(defaultPath)+" "+tmux.ShellQuote(origin))
+		binaryPath()+" prompt "+tmux.ShellQuote(defaultPath))
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
