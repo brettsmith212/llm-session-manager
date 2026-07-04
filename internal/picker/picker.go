@@ -124,7 +124,7 @@ func (p *picker) render() {
 	}
 
 	const itemHeight = 1
-	const headerRows = 5
+	const headerRows = 6
 	// Leave extra room because each new session group adds a header row.
 	visibleCount := max(1, (rows-headerRows-2)/(itemHeight+1))
 
@@ -162,14 +162,17 @@ func (p *picker) render() {
 	row++
 
 	// Help
-	help := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s  %sa%s %sadd%s  %s⏎%s %sopen%s  %s^x%s %skill%s  %sesc%s %squit%s",
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
+	help1 := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s   %s⏎%s %sopen%s",
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset)
-	writeLine(row, cols, help)
+	help2 := fmt.Sprintf("  %sa%s %sadd%s   %s^x%s %skill%s  %sesc%s %squit%s",
+		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
+		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
+		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset)
+	writeLine(row, cols, help1)
+	row++
+	writeLine(row, cols, help2)
 	row++
 
 	// Divider

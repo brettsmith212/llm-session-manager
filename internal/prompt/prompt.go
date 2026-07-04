@@ -58,7 +58,7 @@ func render(path string, cursor int, errMsg string) {
 
 	const title = "  Create new session"
 	const label = "  Create in: "
-	const help = "  Enter to create  ·  Esc to cancel"
+	const help = "  Enter to create  ·  Ctrl-C to cancel"
 
 	writeLine(2, cols, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Blue)+ansi.Bold, title, ansi.Reset))
 
