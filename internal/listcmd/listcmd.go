@@ -38,10 +38,6 @@ func ListCommand() error {
 	}
 
 	allSessions := sessions.GetAllSessions(prefix)
-	if len(allSessions) == 0 {
-		_, _ = tmux.Run([]string{"display-message", "No opencode windows"})
-		return nil
-	}
 
 	bin := binaryPath()
 	ts := ""
@@ -67,10 +63,14 @@ func ListCommand() error {
 		return fmt.Errorf("new-window failed: %w", err)
 	}
 
+	previewCmd := "sleep 1000"
+	if len(allSessions) > 0 {
+		previewCmd = tmux.AttachCommand(allSessions[0].Name, true)
+	}
 	if _, err := tmux.Run([]string{
 		"split-window", "-h", "-l", "67%",
 		"-t", pickerTarget + ".0",
-		tmux.AttachCommand(allSessions[0].Name, true),
+		previewCmd,
 	}); err != nil {
 		return fmt.Errorf("split-window failed: %w", err)
 	}

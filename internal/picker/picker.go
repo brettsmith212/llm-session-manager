@@ -65,11 +65,15 @@ func Run() error {
 		select {
 		case <-ticker.C:
 			next := sessions.GetAllSessions(prefix)
+			hadSessions := len(p.sessions) > 0
 			p.sessions = next
 			snap := p.snapshot()
 			if snap != lastSnapshot {
 				lastSnapshot = snap
 				p.render()
+			}
+			if !hadSessions && len(next) > 0 && p.selectedIndex < len(next) {
+				p.updatePreview(next[p.selectedIndex])
 			}
 		case <-resize:
 			p.render()
@@ -174,7 +178,7 @@ func (p *picker) render() {
 	row++
 
 	if len(visible) == 0 {
-		writeLine(row, cols, fmt.Sprintf("  %sno sessions%s", ansi.Foreground(ansi.Overlay0), ansi.Reset))
+		writeLine(row, cols, fmt.Sprintf("  %sno sessions — press %sa%s to create%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
 		return
 	}
 
