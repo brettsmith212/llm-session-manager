@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"os"
 
+	"llm-session-manager/internal/add"
 	"llm-session-manager/internal/launch"
 	"llm-session-manager/internal/listcmd"
 	"llm-session-manager/internal/picker"
+	"llm-session-manager/internal/prompt"
 	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/types"
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|list|picker|state>")
+	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|list|picker|prompt|state>")
 	os.Exit(1)
 }
 
@@ -38,6 +40,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "add":
+		cwd := currentDir()
+		origin := ""
+		if len(args) > 1 {
+			cwd = args[1]
+		}
+		if len(args) > 2 {
+			origin = args[2]
+		}
+		if err := add.Add(cwd, origin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
 	case "list":
 		if err := listcmd.ListCommand(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -46,6 +62,20 @@ func main() {
 
 	case "picker":
 		if err := picker.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+	case "prompt":
+		defaultPath := currentDir()
+		origin := ""
+		if len(args) > 1 {
+			defaultPath = args[1]
+		}
+		if len(args) > 2 {
+			origin = args[2]
+		}
+		if err := prompt.Run(defaultPath, origin); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

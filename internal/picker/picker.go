@@ -158,7 +158,8 @@ func (p *picker) render() {
 	row++
 
 	// Help
-	help := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s  %s⏎%s %sopen%s  %s^x%s %skill%s  %sesc%s %squit%s",
+	help := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s  %sa%s %sadd%s  %s⏎%s %sopen%s  %s^x%s %skill%s  %sesc%s %squit%s",
+		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
 		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
@@ -391,6 +392,8 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.query = ""
 			p.selectedIndex = 0
 			p.render()
+		case "a":
+			p.openCreatePopup()
 		case "\x18": // ^x
 			p.killSelected()
 			if len(p.sessions) == 0 {
@@ -431,6 +434,44 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 		p.render()
 	}
 	return false
+}
+
+func (p *picker) openCreatePopup() {
+	list := p.filtered()
+	defaultPath := ""
+	origin := ""
+	if p.selectedIndex < len(list) {
+		defaultPath = list[p.selectedIndex].Path
+		origin = tmux.GetSessionOption(list[p.selectedIndex].Name, "@llm_origin")
+	}
+	if defaultPath == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			defaultPath = cwd
+		}
+	}
+
+	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
+	height := "30%"
+
+	cmd := exec.Command("tmux", "display-popup",
+		"-w", width,
+		"-h", height,
+		"-E",
+		binaryPath()+" prompt "+tmux.ShellQuote(defaultPath)+" "+tmux.ShellQuote(origin))
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	_ = cmd.Start()
+}
+
+func binaryPath() string {
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return exe
+	}
+	if path, err := exec.LookPath("llmux"); err == nil {
+		return path
+	}
+	return os.Args[0]
 }
 
 func readInput(out chan<- string) {
