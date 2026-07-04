@@ -119,7 +119,7 @@ func (p *picker) render() {
 		cols, rows = 80, 24
 	}
 
-	const itemHeight = 3
+	const itemHeight = 1
 	const headerRows = 5
 	// Leave extra room because each new session group adds a header row.
 	visibleCount := max(1, (rows-headerRows-2)/(itemHeight+1))
@@ -200,22 +200,18 @@ func (p *picker) render() {
 }
 
 func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
-	inner := cols - 9
+	inner := cols - 24
 	stateStr := string(sessions.EffectiveState(session))
 	sc := stateColor(stateStr)
 	ago := sessions.FormatAgo(session.StateAt)
-	pathStr := truncate(sessions.FormatPath(session.Path), inner)
-	if pathStr == "" {
-		pathStr = "(no path)"
-	}
 	nameStr := truncate(fmt.Sprintf("%s · #%d", session.Name, session.WindowIndex), inner)
 
 	connector := "├─"
-	cont := "│"
 	if isLastInGroup {
 		connector = "└─"
-		cont = " "
 	}
+
+	statePadded := fmt.Sprintf("%-7s", stateStr)
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
@@ -223,30 +219,21 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 		txt := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay2)
 
-		line1 := fmt.Sprintf("  %s%s%s %s● %s%s  %s%s", accent, connector, ansi.Reset, dot, txt, stateStr, muted, ago)
-		line2 := fmt.Sprintf("  %s%s%s   %s%s", accent, cont, ansi.Reset, txt+ansi.Bold, pathStr)
-		line3 := fmt.Sprintf("  %s%s%s   %s%s", accent, cont, ansi.Reset, muted, nameStr)
+		line1 := fmt.Sprintf("  %s%s %s● %s%s  %s%s  %s%s", accent, connector, dot, txt, statePadded, muted, ago, muted, nameStr)
 
 		writeLineBg(row, cols, line1, ansi.Surface0)
-		writeLineBg(row+1, cols, line2, ansi.Surface0)
-		writeLineBg(row+2, cols, line3, ansi.Surface0)
 	} else {
 		tree := ansi.Foreground(ansi.Blue)
 		dot := ansi.Foreground(sc)
 		txt := ansi.Foreground(ansi.Subtext0)
-		path := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay0)
 
-		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s%s", tree, connector, ansi.Reset, dot, txt, stateStr, ansi.Reset, muted, ago, ansi.Reset)
-		line2 := fmt.Sprintf("  %s%s%s   %s%s%s", tree, cont, ansi.Reset, path+ansi.Bold, pathStr, ansi.Reset)
-		line3 := fmt.Sprintf("  %s%s%s   %s%s%s", tree, cont, ansi.Reset, muted, nameStr, ansi.Reset)
+		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s  %s%s%s", tree, connector, ansi.Reset, dot, txt, statePadded, ansi.Reset, muted, ago, muted, nameStr, ansi.Reset)
 
 		writeLine(row, cols, line1)
-		writeLine(row+1, cols, line2)
-		writeLine(row+2, cols, line3)
 	}
 
-	return row + 3
+	return row + 1
 }
 
 func stateColor(state string) ansi.RGB {
