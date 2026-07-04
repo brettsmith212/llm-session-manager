@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 // StaleSeconds is the grace period after which "working" is downgraded to "idle".
 const StaleSeconds = 300
 
-const sessionFormat = "#{session_name}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}"
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_opencode}\t#{window_name}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -68,9 +69,10 @@ func EffectiveState(s types.Session) types.State {
 	return s.State
 }
 
-// GetAllSessions fetches all managed sessions in a single tmux call.
+// GetAllSessions fetches all managed windows (one per opencode) across all
+// managed tmux sessions, grouped and sorted by session then window index.
 func GetAllSessions(prefix string) []types.Session {
-	result := tmux.RunRaw([]string{"list-sessions", "-F", sessionFormat})
+	result := tmux.RunRaw([]string{"list-windows", "-a", "-F", windowFormat})
 	if result.ExitCode != 0 || result.Stdout == "" {
 		return nil
 	}
@@ -81,38 +83,64 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 6)
-		if len(parts) < 6 {
+		parts := strings.SplitN(line, "\t", 10)
+		if len(parts) < 10 {
+			continue
+		}
+
+		// parts[8] is @llm_opencode and parts[9] is window_name.
+		// Prefer the explicit marker, but fall back to the auto-renamed window
+		// name for backwards compatibility with sessions created before this
+		// change and for windows where opencode has started but not yet emitted
+		// its first plugin event.
+		windowName := parts[9]
+		if parts[8] == "" && windowName != "opencode" {
 			continue
 		}
 
 		name := parts[0]
-		state := types.State(parts[1])
+		windowID := parts[1]
+		windowIndex := 0
+		if n, err := strconv.Atoi(parts[2]); err == nil {
+			windowIndex = n
+		}
+
+		state := types.State(parts[3])
 		if !types.IsState(string(state)) {
 			state = ""
 		}
 
 		stateAt := int64(0)
-		if parts[2] != "" {
-			if n, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+		if parts[4] != "" {
+			if n, err := strconv.ParseInt(parts[4], 10, 64); err == nil {
 				stateAt = n
 			}
 		}
 
-		path := parts[3]
+		path := parts[5]
 		if path == "" {
-			path = parts[5]
+			path = parts[7]
 		}
 
-		origin := parts[4]
+		origin := parts[6]
 
 		sessions = append(sessions, types.Session{
-			Name:    name,
-			State:   state,
-			StateAt: stateAt,
-			Path:    path,
-			Origin:  origin,
+			Name:        name,
+			WindowID:    windowID,
+			WindowIndex: windowIndex,
+			State:       state,
+			StateAt:     stateAt,
+			Path:        path,
+			Origin:      origin,
 		})
 	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].Name != sessions[j].Name {
+			return sessions[i].Name < sessions[j].Name
+		}
+		return sessions[i].WindowIndex < sessions[j].WindowIndex
+	})
+
 	return sessions
 }

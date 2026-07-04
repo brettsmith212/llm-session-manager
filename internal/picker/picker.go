@@ -55,7 +55,7 @@ func Run() error {
 	go readInput(input)
 
 	if first := p.filtered(); len(first) > 0 {
-		p.updatePreview(first[0].Name)
+		p.updatePreview(first[0])
 	}
 	p.render()
 
@@ -107,7 +107,7 @@ func (p *picker) filtered() []types.Session {
 func (p *picker) snapshot() string {
 	parts := make([]string, len(p.sessions))
 	for i, s := range p.sessions {
-		parts[i] = fmt.Sprintf("%s:%s:%d:%s", s.Name, s.State, s.StateAt, s.Path)
+		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%d:%s", s.Name, s.WindowID, s.WindowIndex, s.State, s.StateAt, s.Path)
 	}
 	return strings.Join(parts, "|")
 }
@@ -121,7 +121,8 @@ func (p *picker) render() {
 
 	const itemHeight = 3
 	const headerRows = 5
-	visibleCount := max(1, (rows-headerRows)/(itemHeight+1))
+	// Leave extra room because each new session group adds a header row.
+	visibleCount := max(1, (rows-headerRows-2)/(itemHeight+1))
 
 	if p.selectedIndex >= len(list) {
 		p.selectedIndex = max(0, len(list)-1)
@@ -176,18 +177,30 @@ func (p *picker) render() {
 		return
 	}
 
+	var prevSession string
 	for i, session := range visible {
+		if session.Name != prevSession {
+			path := sessions.FormatPath(session.Path)
+			if path == "" {
+				path = session.Name
+			}
+			header := fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), path, ansi.Reset)
+			writeLine(row, cols, header)
+			row++
+			prevSession = session.Name
+		}
 		selected := startIndex+i == p.selectedIndex
-		row = drawItem(session, cols, selected, row)
-		if i < len(visible)-1 {
+		isLastInGroup := i == len(visible)-1 || visible[i+1].Name != session.Name
+		row = drawItem(session, cols, selected, row, isLastInGroup)
+		if i < len(visible)-1 && visible[i+1].Name != session.Name {
 			writeLine(row, cols, "")
 			row++
 		}
 	}
 }
 
-func drawItem(session types.Session, cols int, selected bool, row int) int {
-	inner := cols - 6
+func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
+	inner := cols - 9
 	stateStr := string(sessions.EffectiveState(session))
 	sc := stateColor(stateStr)
 	ago := sessions.FormatAgo(session.StateAt)
@@ -195,7 +208,14 @@ func drawItem(session types.Session, cols int, selected bool, row int) int {
 	if pathStr == "" {
 		pathStr = "(no path)"
 	}
-	nameStr := truncate(session.Name, inner)
+	nameStr := truncate(fmt.Sprintf("%s · #%d", session.Name, session.WindowIndex), inner)
+
+	connector := "├─"
+	cont := "│"
+	if isLastInGroup {
+		connector = "└─"
+		cont = " "
+	}
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
@@ -203,22 +223,23 @@ func drawItem(session types.Session, cols int, selected bool, row int) int {
 		txt := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay2)
 
-		line1 := fmt.Sprintf("%s┃%s ● %s%s  %s%s", accent, dot, txt, stateStr, muted, ago)
-		line2 := fmt.Sprintf("%s┃%s%s   %s", accent, txt, ansi.Bold, pathStr)
-		line3 := fmt.Sprintf("%s┃%s   %s", accent, muted, nameStr)
+		line1 := fmt.Sprintf("  %s%s%s %s● %s%s  %s%s", accent, connector, ansi.Reset, dot, txt, stateStr, muted, ago)
+		line2 := fmt.Sprintf("  %s%s%s   %s%s", accent, cont, ansi.Reset, txt+ansi.Bold, pathStr)
+		line3 := fmt.Sprintf("  %s%s%s   %s%s", accent, cont, ansi.Reset, muted, nameStr)
 
 		writeLineBg(row, cols, line1, ansi.Surface0)
 		writeLineBg(row+1, cols, line2, ansi.Surface0)
 		writeLineBg(row+2, cols, line3, ansi.Surface0)
 	} else {
+		tree := ansi.Foreground(ansi.Blue)
 		dot := ansi.Foreground(sc)
 		txt := ansi.Foreground(ansi.Subtext0)
 		path := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay0)
 
-		line1 := fmt.Sprintf("  %s● %s%s%s  %s%s%s", dot, txt, stateStr, ansi.Reset, muted, ago, ansi.Reset)
-		line2 := fmt.Sprintf("    %s%s%s", path+ansi.Bold, pathStr, ansi.Reset)
-		line3 := fmt.Sprintf("    %s%s%s", muted, nameStr, ansi.Reset)
+		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s%s", tree, connector, ansi.Reset, dot, txt, stateStr, ansi.Reset, muted, ago, ansi.Reset)
+		line2 := fmt.Sprintf("  %s%s%s   %s%s%s", tree, cont, ansi.Reset, path+ansi.Bold, pathStr, ansi.Reset)
+		line3 := fmt.Sprintf("  %s%s%s   %s%s%s", tree, cont, ansi.Reset, muted, nameStr, ansi.Reset)
 
 		writeLine(row, cols, line1)
 		writeLine(row+1, cols, line2)
@@ -266,8 +287,8 @@ func truncate(str string, width int) string {
 	return str[:width-1] + "…"
 }
 
-func (p *picker) updatePreview(name string) {
-	cmd := tmux.AttachCommand(name, true)
+func (p *picker) updatePreview(session types.Session) {
+	cmd := tmux.AttachCommand(session.Name, true) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
 	result := tmux.RunRaw([]string{"list-panes", "-t", windowName, "-F", "#{pane_index}"})
 	if result.ExitCode != 0 {
 		return
@@ -285,7 +306,7 @@ func (p *picker) changeSelection(delta int) {
 	list := p.filtered()
 	p.selectedIndex = max(0, min(len(list)-1, p.selectedIndex+delta))
 	if p.selectedIndex < len(list) {
-		p.updatePreview(list[p.selectedIndex].Name)
+		p.updatePreview(list[p.selectedIndex])
 	}
 	p.render()
 }
@@ -306,12 +327,13 @@ func (p *picker) activateSession() {
 	}
 
 	if p.parent != "" {
+		attachCmd := tmux.AttachCommand(session.Name, false) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
 		cmd := exec.Command("tmux", "display-popup",
 			"-c", p.parent,
 			"-w", width,
 			"-h", height,
 			"-E",
-			tmux.AttachCommand(session.Name, false))
+			attachCmd)
 		cmd.Stdin = nil
 		cmd.Stdout = nil
 		cmd.Stderr = nil
@@ -326,7 +348,24 @@ func (p *picker) killSelected() {
 		return
 	}
 	session := list[p.selectedIndex]
-	_ = tmux.KillSession(session.Name)
+
+	_ = tmux.KillWindow(session.Name + ":" + session.WindowID)
+
+	// If the parent session has no opencode windows left, clean it up too.
+	remaining := tmux.RunRaw([]string{"list-windows", "-t", session.Name, "-F", "#{@llm_opencode}"})
+	hasOpencode := false
+	if remaining.ExitCode == 0 && remaining.Stdout != "" {
+		for _, line := range strings.Split(remaining.Stdout, "\n") {
+			if strings.TrimSpace(line) != "" {
+				hasOpencode = true
+				break
+			}
+		}
+	}
+	if !hasOpencode {
+		_ = tmux.KillSession(session.Name)
+	}
+
 	p.sessions = sessions.GetAllSessions(p.prefix)
 	if len(p.sessions) == 0 {
 		_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
@@ -336,7 +375,7 @@ func (p *picker) killSelected() {
 		p.selectedIndex = max(0, len(p.sessions)-1)
 	}
 	if next := p.filtered(); len(next) > 0 && p.selectedIndex < len(next) {
-		p.updatePreview(next[p.selectedIndex].Name)
+		p.updatePreview(next[p.selectedIndex])
 	}
 	p.render()
 }
@@ -393,14 +432,14 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 		}
 		p.selectedIndex = 0
 		if list := p.filtered(); len(list) > 0 {
-			p.updatePreview(list[0].Name)
+			p.updatePreview(list[0])
 		}
 		p.render()
 	case code >= 32 && code <= 126:
 		p.query += key
 		p.selectedIndex = 0
 		if list := p.filtered(); len(list) > 0 {
-			p.updatePreview(list[0].Name)
+			p.updatePreview(list[0])
 		}
 		p.render()
 	}

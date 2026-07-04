@@ -39,7 +39,7 @@ func ListCommand() error {
 
 	allSessions := sessions.GetAllSessions(prefix)
 	if len(allSessions) == 0 {
-		_, _ = tmux.Run([]string{"display-message", "No opencode sessions"})
+		_, _ = tmux.Run([]string{"display-message", "No opencode windows"})
 		return nil
 	}
 

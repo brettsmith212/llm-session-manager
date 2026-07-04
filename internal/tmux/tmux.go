@@ -61,6 +61,18 @@ func SetSessionOption(session, name, value string) error {
 	return err
 }
 
+// GetWindowOption reads a window option, returning "" if unset.
+func GetWindowOption(window, name string) string {
+	result := RunRaw([]string{"show-options", "-wqv", "-t", window, name})
+	return result.Stdout
+}
+
+// SetWindowOption sets a window option.
+func SetWindowOption(window, name, value string) error {
+	_, err := Run([]string{"set-window-option", "-t", window, name, value})
+	return err
+}
+
 // SetGlobalOption sets a global option.
 func SetGlobalOption(name, value string) error {
 	_, err := Run([]string{"set-option", "-g", name, value})
@@ -119,6 +131,12 @@ func NewSession(name, cwd, command string) error {
 // KillSession kills a tmux session.
 func KillSession(name string) error {
 	_, err := Run([]string{"kill-session", "-t", name})
+	return err
+}
+
+// KillWindow kills a tmux window.
+func KillWindow(target string) error {
+	_, err := Run([]string{"kill-window", "-t", target})
 	return err
 }
 

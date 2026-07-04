@@ -32,6 +32,10 @@ func Launch(cwd, origin string) error {
 		if err := tmux.NewSession(sessionName, cwd, command); err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
+		// Mark the initial window as an opencode window so the picker can find it
+		// even before the first state event arrives.
+		_ = tmux.SetWindowOption(sessionName+":0", "@llm_opencode", "1")
+		_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	}
 
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {

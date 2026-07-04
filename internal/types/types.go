@@ -20,11 +20,13 @@ func IsState(value string) bool {
 	return false
 }
 
-// Session describes a single managed tmux session.
+// Session describes a single managed tmux window running an LLM agent.
 type Session struct {
-	Name    string
-	State   State
-	StateAt int64
-	Path    string
-	Origin  string
+	Name        string // parent tmux session name
+	WindowID    string // tmux window id, e.g. "@1"
+	WindowIndex int    // tmux window index, e.g. 0
+	State       State
+	StateAt     int64
+	Path        string
+	Origin      string
 }

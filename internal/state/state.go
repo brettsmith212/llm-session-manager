@@ -10,7 +10,7 @@ import (
 	"llm-session-manager/internal/types"
 )
 
-// SetState updates the current tmux session's state and timestamp.
+// SetState updates the current tmux window's state and timestamp.
 func SetState(state types.State) error {
 	pane := os.Getenv("TMUX_PANE")
 	if pane == "" {
@@ -29,8 +29,24 @@ func SetState(state types.State) error {
 		return nil
 	}
 
-	if err := tmux.SetSessionOption(session, "@llm_state", string(state)); err != nil {
+	result = tmux.RunRaw([]string{"display-message", "-p", "-t", pane, "#{window_id}"})
+	if result.ExitCode != 0 {
+		return fmt.Errorf("failed to resolve window from pane")
+	}
+	windowID := strings.TrimSpace(result.Stdout)
+	if windowID == "" {
+		return fmt.Errorf("empty window id from pane")
+	}
+
+	// Mark this window as hosting an opencode if it isn't already.
+	if tmux.GetWindowOption(windowID, "@llm_opencode") == "" {
+		if err := tmux.SetWindowOption(windowID, "@llm_opencode", "1"); err != nil {
+			return err
+		}
+	}
+
+	if err := tmux.SetWindowOption(windowID, "@llm_state", string(state)); err != nil {
 		return err
 	}
-	return tmux.SetSessionOption(session, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix()))
+	return tmux.SetWindowOption(windowID, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix()))
 }
