@@ -33,6 +33,7 @@ func Run() error {
 		query:         "",
 		selectedIndex: 0,
 		isSearching:   false,
+		pickerActive:  true,
 	}
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -53,6 +54,14 @@ func Run() error {
 
 	input := make(chan string, 16)
 	go readInput(input)
+
+	// ── B: poll which pane the user has focused (picker left vs preview
+	// right). The picker pane (.0) is the only one reading keys, but tmux
+	// flips pane_active when the user clicks / Ctrl-arrows into the preview.
+	// We sample pane_active every ~150ms and re-render on change so the
+	// in-canvas header reflects reality.
+	activeChange := make(chan bool, 4)
+	go pollPaneActive(activeChange)
 
 	if first := p.filtered(); len(first) > 0 {
 		p.updatePreview(first[0])
@@ -77,6 +86,11 @@ func Run() error {
 			}
 		case <-resize:
 			p.render()
+		case active := <-activeChange:
+			if active != p.pickerActive {
+				p.pickerActive = active
+				p.render()
+			}
 		case keys := <-input:
 			if done := p.handleKeys(keys); done {
 				return nil
@@ -92,6 +106,7 @@ type picker struct {
 	query         string
 	selectedIndex int
 	isSearching   bool
+	pickerActive  bool // true when left pane (.0) is the active tmux pane
 }
 
 func (p *picker) filtered() []types.Session {
@@ -137,8 +152,17 @@ func (p *picker) render() {
 	fmt.Print(ansi.ClearScreen)
 
 	row := 1
-	// Title
-	writeLine(row, cols, fmt.Sprintf("  %s%sSessions%s", ansi.Foreground(ansi.Blue), ansi.Bold, ansi.Reset))
+	// Title — bright blue bar when picker is focused; muted hint bar when
+	// the user has moved focus into the preview pane on the right.
+	if p.pickerActive {
+		writeLineBg(row, cols, fmt.Sprintf(" %s%s◆ Sessions%s", ansi.Foreground(ansi.Base), ansi.Bold, ansi.Reset), ansi.Blue)
+	} else {
+		writeLineBg(row, cols,
+			fmt.Sprintf(" %s%s◀ focus picker%s   %spreview active — ← to return%s",
+				ansi.Foreground(ansi.Overlay2), ansi.Bold, ansi.Reset,
+				ansi.Foreground(ansi.Overlay0), ansi.Reset),
+			ansi.Surface0)
+	}
 	row++
 
 	// Counter / search
@@ -161,15 +185,22 @@ func (p *picker) render() {
 	}
 	row++
 
-	// Help
+	// Help — dimmed to overlay0 (with cancelled accent glyphs) when the
+	// picker is blurred so the eye is drawn away to the preview pane.
+	helpAccent := ansi.Foreground(ansi.Surface2)
+	helpMuted := ansi.Foreground(ansi.Overlay0)
+	if !p.pickerActive {
+		helpAccent = ansi.Foreground(ansi.Overlay0)
+		helpMuted = ansi.Foreground(ansi.Crust)
+	}
 	help1 := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s   %s⏎%s %sopen%s",
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset)
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
 	help2 := fmt.Sprintf("  %sa%s %sadd%s   %s^x%s %skill%s  %sesc%s %squit%s",
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset)
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
 	writeLine(row, cols, help1)
 	row++
 	writeLine(row, cols, help2)
@@ -192,14 +223,18 @@ func (p *picker) render() {
 			if path == "" {
 				path = session.Name
 			}
-			header := fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), path, ansi.Reset)
+			pathColor := ansi.Blue
+			if !p.pickerActive {
+				pathColor = ansi.Overlay0
+			}
+			header := fmt.Sprintf("  %s%s%s", ansi.Foreground(pathColor), path, ansi.Reset)
 			writeLine(row, cols, header)
 			row++
 			prevSession = session.Name
 		}
 		selected := startIndex+i == p.selectedIndex
 		isLastInGroup := i == len(visible)-1 || visible[i+1].Name != session.Name
-		row = drawItem(session, cols, selected, row, isLastInGroup)
+		row = drawItem(session, cols, selected, row, isLastInGroup, p.pickerActive)
 		if i < len(visible)-1 && visible[i+1].Name != session.Name {
 			writeLine(row, cols, "")
 			row++
@@ -207,7 +242,7 @@ func (p *picker) render() {
 	}
 }
 
-func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
+func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool, active bool) int {
 	inner := cols - 24
 	stateStr := string(sessions.EffectiveState(session))
 	sc := stateColor(stateStr)
@@ -220,6 +255,21 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 	}
 
 	statePadded := fmt.Sprintf("%-7s", stateStr)
+
+	// ── C: when the picker pane is blurred, dim the entire list to a single
+	// overlay0 tone so the left side reads as "asleep" and the eye is drawn
+	// to the now-active preview pane on the right. Selection highlight is
+	// also dropped (no bg fill) so an inactive selection doesn't scream.
+	if !active {
+		dim := ansi.Foreground(ansi.Overlay0)
+		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s  %s%s%s",
+			dim, connector, ansi.Reset,
+			dim, dim, statePadded, ansi.Reset,
+			dim, ago,
+			dim, nameStr, ansi.Reset)
+		writeLine(row, cols, line1)
+		return row + 1
+	}
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
@@ -294,6 +344,11 @@ func (p *picker) updatePreview(session types.Session) {
 	} else {
 		_, _ = tmux.Run([]string{"split-window", "-h", "-l", "67%", "-t", ":" + windowName + ".0", cmd})
 	}
+	// Refresh the preview pane title with the live name + window index so
+	// the "▶ Preview · …" border label always tracks what is shown there.
+	_ = tmux.RunRaw([]string{"select-pane", "-T",
+		fmt.Sprintf("▶ Preview · %s #%d", session.Name, session.WindowIndex),
+		"-t", ":" + windowName + ".1"})
 	_, _ = tmux.Run([]string{"select-pane", "-t", ":" + windowName + ".0"})
 }
 
@@ -555,4 +610,22 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// pollPaneActive reports whether the picker pane (.0) is the active tmux
+// pane. It sends the current value once on startup, then pushes only on
+// change so the render loop sleeps idle otherwise.
+func pollPaneActive(out chan<- bool) {
+	last := true
+	out <- last
+	t := time.NewTicker(150 * time.Millisecond)
+	defer t.Stop()
+	for range t.C {
+		res := tmux.RunRaw([]string{"display-message", "-p", "-t", windowName + ".0", "#{pane_active}"})
+		active := strings.TrimSpace(res.Stdout) == "1"
+		if active != last {
+			last = active
+			out <- active
+		}
+	}
 }

@@ -75,6 +75,22 @@ func ListCommand() error {
 		return fmt.Errorf("split-window failed: %w", err)
 	}
 
+	// ── A: pane borders + titles so picker (left) and preview (right) are
+	// visually distinct. Only the active pane gets a bright blue border; the
+	// inactive one stays muted. Each pane has its own title shown on top.
+	borderOpts := [][2]string{
+		{"pane-border-status", "top"},
+		{"pane-border-format", " #{pane_title} "},
+		{"pane-border-style", "fg=#6c7086"},            // Catppuccin Overlay0
+		{"pane-active-border-style", "fg=#89b4fa,bold"}, // Catppuccin Blue
+		{"pane-border-lines", "heavy"},
+	}
+	for _, o := range borderOpts {
+		_ = tmux.SetWindowOption(pickerTarget, o[0], o[1])
+	}
+	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".0", "-T", "◆ Sessions"})
+	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".1", "-T", "▶ Preview"})
+
 	if _, err := tmux.Run([]string{
 		"respawn-pane", "-k",
 		"-t", pickerTarget + ".0",
