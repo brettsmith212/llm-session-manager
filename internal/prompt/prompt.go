@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -297,12 +298,13 @@ func commonPrefix(a, b string) string {
 }
 
 func submit(path, origin string) {
-	_ = tmux.RunRaw([]string{"kill-window", "-t", pickerWindow})
 	cmd := exec.Command(binaryPath(), "add", path, origin)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	_ = cmd.Start()
+	_ = tmux.RunRaw([]string{"kill-window", "-t", pickerWindow})
 }
 
 func binaryPath() string {

@@ -29,13 +29,13 @@ func Add(cwd, origin string) error {
 
 	var windowID string
 	if !tmux.HasSession(sessionName) {
-		result, err := tmux.Run([]string{"new-session", "-d", "-s", sessionName, "-c", abs, "-F", "#{window_id}", command})
+		result, err := tmux.Run([]string{"new-session", "-dP", "-s", sessionName, "-c", abs, "-F", "#{window_id}", command})
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
 		windowID = result
 	} else {
-		result, err := tmux.Run([]string{"new-window", "-d", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
+		result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
 		if err != nil {
 			return fmt.Errorf("failed to create window: %w", err)
 		}
@@ -63,11 +63,13 @@ func Add(cwd, origin string) error {
 		_ = tmux.EnsureOriginWindow(originSession, abs, "")
 	}
 
+	parentClient := tmux.GetGlobalOption("@llm_parent", "")
 	attachCmd := tmux.AttachCommand(sessionName, false) + " \\; select-window -t " + tmux.ShellQuote(windowID)
 	return tmux.DisplayPopup(tmux.DisplayPopupOptions{
 		Width:   width,
 		Height:  height,
 		Command: attachCmd,
+		Client:  parentClient,
 	})
 }
 

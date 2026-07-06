@@ -87,7 +87,7 @@ func findOrCreateWindowAtCwd(session, cwd string) (string, error) {
 		}
 	}
 
-	out, err := Run([]string{"new-window", "-d", "-t", session + ":", "-c", absCwd, "-F", "#{window_id}"})
+	out, err := Run([]string{"new-window", "-dP", "-t", session + ":", "-c", absCwd, "-F", "#{window_id}"})
 	if err != nil {
 		return "", err
 	}
