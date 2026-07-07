@@ -35,11 +35,23 @@ func Add(cwd, origin string) error {
 		}
 		windowID = result
 	} else {
-		result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
-		if err != nil {
-			return fmt.Errorf("failed to create window: %w", err)
+		// If the session was warm-only (created by `llmux warm`, never
+		// attached), promote the existing warm window — the agent process
+		// is already running. Otherwise, create a new window for the
+		// additional agent.
+		if tmux.GetSessionOption(sessionName, "@llm_ever_attached") == "" {
+			wid, err := tmux.DisplayMessage("#{window_id}", sessionName+":0")
+			if err != nil {
+				return fmt.Errorf("failed to resolve warm window: %w", err)
+			}
+			windowID = wid
+		} else {
+			result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
+			if err != nil {
+				return fmt.Errorf("failed to create window: %w", err)
+			}
+			windowID = result
 		}
-		windowID = result
 	}
 
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", abs); err != nil {
@@ -58,6 +70,8 @@ func Add(cwd, origin string) error {
 
 	_ = tmux.SetWindowOption(windowID, "@llm_opencode", "1")
 	_ = tmux.SetWindowOption(windowID, "@llm_path", abs)
+	_ = tmux.RenameWindow(windowID, "opencode")
+	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
 
 	if originSession != "" && originSession != sessionName {
 		_ = tmux.EnsureOriginWindow(originSession, abs, "")

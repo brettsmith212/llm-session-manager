@@ -140,6 +140,12 @@ func KillWindow(target string) error {
 	return err
 }
 
+// RenameWindow renames a tmux window.
+func RenameWindow(target, name string) error {
+	_, err := Run([]string{"rename-window", "-t", target, name})
+	return err
+}
+
 // DetachClient detaches all clients attached to session.
 func DetachClient(session string) error {
 	_, err := Run([]string{"detach-client", "-s", session})

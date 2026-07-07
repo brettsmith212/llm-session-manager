@@ -39,9 +39,13 @@ func SetState(state types.State) error {
 	}
 
 	// Mark this window as hosting an opencode if it isn't already.
+	// Skip for warm-only sessions (never attached) — they stay hidden
+	// from the picker until launch/add promotes them.
 	if tmux.GetWindowOption(windowID, "@llm_opencode") == "" {
-		if err := tmux.SetWindowOption(windowID, "@llm_opencode", "1"); err != nil {
-			return err
+		if tmux.GetSessionOption(session, "@llm_ever_attached") != "" {
+			if err := tmux.SetWindowOption(windowID, "@llm_opencode", "1"); err != nil {
+				return err
+			}
 		}
 	}
 

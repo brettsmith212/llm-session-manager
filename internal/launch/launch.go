@@ -32,11 +32,15 @@ func Launch(cwd, origin string) error {
 		if err := tmux.NewSession(sessionName, cwd, command); err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
-		// Mark the initial window as an opencode window so the picker can find it
-		// even before the first state event arrives.
-		_ = tmux.SetWindowOption(sessionName+":0", "@llm_opencode", "1")
-		_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	}
+
+	// Promote the session: visible in the picker, protected from warm
+	// eviction, window named correctly. Runs on both the create path and
+	// the warm fast path (when a background warm session already exists).
+	_ = tmux.SetWindowOption(sessionName+":0", "@llm_opencode", "1")
+	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
+	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
+	_ = tmux.RenameWindow(sessionName+":0", "opencode")
 
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {
 		return err

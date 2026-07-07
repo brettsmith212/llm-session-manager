@@ -197,7 +197,7 @@ func (p *picker) render() {
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
-	help2 := fmt.Sprintf("  %sa%s %sadd%s   %s^x%s %skill%s  %sesc%s %squit%s",
+	help2 := fmt.Sprintf("  %sa%s %sadd%s   %s^x%s %skill%s  %sq%s %squit%s",
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset)

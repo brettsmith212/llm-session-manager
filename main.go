@@ -5,16 +5,18 @@ import (
 	"os"
 
 	"llm-session-manager/internal/add"
+	"llm-session-manager/internal/initcmd"
 	"llm-session-manager/internal/launch"
 	"llm-session-manager/internal/listcmd"
 	"llm-session-manager/internal/picker"
 	"llm-session-manager/internal/prompt"
 	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/types"
+	"llm-session-manager/internal/warm"
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|list|picker|prompt|state>")
+	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|warm|list|picker|prompt|state|init>")
 	os.Exit(1)
 }
 
@@ -50,6 +52,16 @@ func main() {
 			origin = args[2]
 		}
 		if err := add.Add(cwd, origin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+	case "warm":
+		cwd := currentDir()
+		if len(args) > 1 {
+			cwd = args[1]
+		}
+		if err := warm.Warm(cwd); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -90,6 +102,16 @@ func main() {
 			os.Exit(1)
 		}
 		if err := state.SetState(types.State(args[1])); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+	case "init":
+		shell := "zsh"
+		if len(args) > 1 {
+			shell = args[1]
+		}
+		if err := initcmd.Run(shell); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

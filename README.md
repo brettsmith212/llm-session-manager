@@ -43,9 +43,32 @@ nix build .#claude-plugin   # the Claude Code plugin
 
 ```bash
 llmux launch <cwd> <window_id>   # create a session for a new agent
+llmux warm <cwd>                 # pre-warm a session in the background (hidden from picker)
 llmux list                         # list sessions (used by the picker)
 llmux state <working|waiting|idle> # update session state from a hook
 ```
+
+### Pre-warming
+
+Add one of these lines to your `.zshrc` or `.bashrc` (depending on your shell)
+so sessions pre-warm in the background when you `cd` into a git project root.
+The agent boots detached and hidden from the picker, so by the time you open it
+with `Ctrl+a y` it's already ready — no multi-second cold start:
+
+```zsh
+# add to ~/.zshrc
+eval "$(llmux init zsh)"
+```
+
+```bash
+# add to ~/.bashrc
+eval "$(llmux init bash)"
+```
+
+Only fires inside tmux and at directories containing `.git`. Warm sessions are
+capped (default 5, configurable via the `@llm_warm_cap` tmux option; `0` for
+unlimited); the oldest is evicted LRU-style. A session is promoted out of the
+warm pool the first time you launch it and won't be evicted by warming.
 
 ## Build without Nix
 
