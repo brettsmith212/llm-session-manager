@@ -15,6 +15,21 @@ func EnsureOriginWindow(originSession, cwd, parentClient string) error {
 	if originSession == "" || cwd == "" {
 		return nil
 	}
+	if strings.HasPrefix(originSession, "@") {
+		// Sessions created before the launch.go fix may have a window ID
+		// (e.g. "@0") stored as their origin instead of a session name —
+		// has-session accepts window-ID-shaped targets (resolving them to
+		// their enclosing session), which let this slip past validation at
+		// creation time, but switch-client's "session:window" target
+		// requires an actual session name and fails. Resolve the window ID
+		// back to its real session so already-created sessions heal
+		// themselves instead of erroring forever.
+		resolved, err := DisplayMessage("#{session_name}", originSession)
+		if err != nil || resolved == "" {
+			return nil
+		}
+		originSession = resolved
+	}
 	if !HasSession(originSession) {
 		return nil
 	}
@@ -35,7 +50,11 @@ func EnsureOriginWindow(originSession, cwd, parentClient string) error {
 
 	res := RunRaw([]string{"switch-client", "-c", parentClient, "-t", originSession + ":" + target})
 	if res.ExitCode != 0 {
-		return fmt.Errorf("switch-client failed: %s", res.Stdout)
+		msg := res.Stderr
+		if msg == "" {
+			msg = res.Stdout
+		}
+		return fmt.Errorf("switch-client failed: %s", msg)
 	}
 	return nil
 }

@@ -10,15 +10,16 @@ import (
 // Result captures the output and exit code of a tmux invocation.
 type Result struct {
 	Stdout   string
+	Stderr   string
 	ExitCode int
 }
 
 // RunRaw runs a tmux command and returns raw output without checking the exit code.
 func RunRaw(args []string) Result {
 	cmd := exec.Command("tmux", args...)
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
-	cmd.Stderr = nil
+	cmd.Stderr = &errOut
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {
@@ -28,14 +29,22 @@ func RunRaw(args []string) Result {
 			exitCode = 1
 		}
 	}
-	return Result{Stdout: strings.TrimRight(out.String(), "\n"), ExitCode: exitCode}
+	return Result{
+		Stdout:   strings.TrimRight(out.String(), "\n"),
+		Stderr:   strings.TrimRight(errOut.String(), "\n"),
+		ExitCode: exitCode,
+	}
 }
 
 // Run runs a tmux command and returns its stdout, or an error if it fails.
 func Run(args []string) (string, error) {
 	result := RunRaw(args)
 	if result.ExitCode != 0 {
-		return "", fmt.Errorf("tmux %s failed with code %d", strings.Join(args, " "), result.ExitCode)
+		msg := result.Stderr
+		if msg == "" {
+			msg = result.Stdout
+		}
+		return "", fmt.Errorf("tmux %s failed with code %d: %s", strings.Join(args, " "), result.ExitCode, msg)
 	}
 	return result.Stdout, nil
 }

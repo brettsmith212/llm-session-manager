@@ -106,7 +106,8 @@ type picker struct {
 	query         string
 	selectedIndex int
 	isSearching   bool
-	pickerActive  bool // true when left pane (.0) is the active tmux pane
+	pickerActive  bool   // true when left pane (.0) is the active tmux pane
+	activateErr   string // set when activateSession fails to reach the origin window
 }
 
 func (p *picker) filtered() []types.Session {
@@ -210,6 +211,12 @@ func (p *picker) render() {
 	div := fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Surface0), strings.Repeat("─", min(listWidth(cols)-4, cols-4)), ansi.Reset)
 	writeLine(row, cols, div)
 	row++
+
+	if p.activateErr != "" {
+		writeLine(row, cols, fmt.Sprintf("  %scouldn't switch to parent window: %s%s",
+			ansi.Foreground(ansi.Red), p.activateErr, ansi.Reset))
+		row++
+	}
 
 	if len(visible) == 0 {
 		writeLine(row, cols, fmt.Sprintf("  %sno sessions — press %sa%s to create%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
@@ -353,6 +360,7 @@ func (p *picker) updatePreview(session types.Session) {
 }
 
 func (p *picker) changeSelection(delta int) {
+	p.activateErr = ""
 	list := p.filtered()
 	p.selectedIndex = max(0, min(len(list)-1, p.selectedIndex+delta))
 	if p.selectedIndex < len(list) {
@@ -361,10 +369,14 @@ func (p *picker) changeSelection(delta int) {
 	p.render()
 }
 
-func (p *picker) activateSession() {
+// activateSession attempts to switch to the session's origin window and pop
+// it up. It returns true only once the picker window has actually been
+// handed off (killed) — false means the picker should stay open so the user
+// can see the error and retry rather than being left in a dead pane.
+func (p *picker) activateSession() bool {
 	list := p.filtered()
 	if p.selectedIndex >= len(list) {
-		return
+		return false
 	}
 	session := list[p.selectedIndex]
 
@@ -379,7 +391,15 @@ func (p *picker) activateSession() {
 		origin = tmux.GetParentSession()
 	}
 	if origin != "" && origin != session.Name {
-		_ = tmux.EnsureOriginWindow(origin, session.Path, p.parent)
+		if err := tmux.EnsureOriginWindow(origin, session.Path, p.parent); err != nil {
+			// Don't fall through to opening the popup / killing the picker
+			// window on a half-completed switch — that's what leaves the
+			// popup stacked on whatever window the client happened to be on
+			// before. Surface the failure and let the user retry instead.
+			p.activateErr = err.Error()
+			p.render()
+			return false
+		}
 	}
 
 	if p.parent != "" {
@@ -396,6 +416,7 @@ func (p *picker) activateSession() {
 		_ = cmd.Start()
 	}
 	_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
+	return true
 }
 
 func (p *picker) killSelected() {
@@ -453,8 +474,9 @@ func (p *picker) handleKeys(data string) (done bool) {
 		case "\x1b[B", "j":
 			p.changeSelection(1)
 		case "\r":
-			p.activateSession()
-			return true
+			if p.activateSession() {
+				return true
+			}
 		case "/":
 			p.isSearching = true
 			p.query = ""

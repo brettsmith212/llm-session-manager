@@ -49,8 +49,23 @@ func Launch(cwd, origin string) error {
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {
 		return err
 	}
-	if origin != "" {
-		if err := tmux.SetSessionOption(sessionName, "@llm_origin", origin); err != nil {
+
+	// Prefer the session we're actually running in (already resolved above
+	// via "#S") over the caller-supplied origin — it's derived the same way
+	// tmux itself would resolve "current session" and can't be stale. Only
+	// fall back to the passed-in value if that lookup failed. Guard against
+	// a window ID (e.g. "@3") ever being stored here: EnsureOriginWindow
+	// needs a session name, and a stray window ID is a symptom of a caller
+	// bug rather than a usable origin.
+	originSession := currentSession
+	if originSession == "" || originSession == "__unknown__" {
+		originSession = origin
+	}
+	if strings.HasPrefix(originSession, "@") {
+		originSession = ""
+	}
+	if originSession != "" && originSession != sessionName {
+		if err := tmux.SetSessionOption(sessionName, "@llm_origin", originSession); err != nil {
 			return err
 		}
 	}

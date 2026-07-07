@@ -67,7 +67,11 @@ func main() {
 		}
 
 	case "list":
-		if err := listcmd.ListCommand(); err != nil {
+		clientName := ""
+		if len(args) > 1 {
+			clientName = args[1]
+		}
+		if err := listcmd.ListCommand(clientName); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

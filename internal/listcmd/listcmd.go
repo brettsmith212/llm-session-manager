@@ -14,8 +14,13 @@ import (
 
 const windowName = "llm-picker"
 
-// ListCommand builds the tmux picker window.
-func ListCommand() error {
+// ListCommand builds the tmux picker window. clientName, when non-empty, is
+// the tmux client that invoked the command (typically "#{client_name}"
+// expanded by the calling key binding) and is used as the host client
+// instead of guessing from the server-wide client list — guessing breaks
+// down as soon as more than one non-managed client is attached anywhere on
+// the tmux server.
+func ListCommand(clientName string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
 
 	// Detach any nested managed session so the picker isn't nested inside one.
@@ -30,7 +35,7 @@ func ListCommand() error {
 		}
 	}
 
-	host := getHost(prefix)
+	host := resolveHost(prefix, clientName)
 	if host != nil {
 		_ = tmux.SetGlobalOption("@llm_parent", host.Client)
 	} else {
@@ -118,6 +123,21 @@ func getNestedSession(prefix string) string {
 		}
 	}
 	return ""
+}
+
+// resolveHost finds the ClientInfo for clientName among attached clients. If
+// clientName is empty or no longer attached, it falls back to getHost's
+// best-effort scan (e.g. when ListCommand is invoked manually with no
+// binding-supplied client name).
+func resolveHost(prefix, clientName string) *tmux.ClientInfo {
+	if clientName != "" {
+		for _, c := range tmux.ListClients() {
+			if c.Client == clientName {
+				return &c
+			}
+		}
+	}
+	return getHost(prefix)
 }
 
 func getHost(prefix string) *tmux.ClientInfo {
