@@ -11,11 +11,14 @@ import (
 )
 
 // Add creates or reuses a managed tmux session for cwd and opens a new
-// opencode window in it, then pops up attached to that session with the new
+// agent window in it, then pops up attached to that session with the new
 // window selected.
 func Add(cwd, origin string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	command := tmux.GetGlobalOption("@llm_command", "opencode")
+	command := tmux.GetGlobalOption("@llm_command", "")
+	if command == "" {
+		return fmt.Errorf("@llm_command is not set; set it in tmux.conf (e.g. 'set -g @llm_command \"amp\"')")
+	}
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
 
@@ -68,9 +71,9 @@ func Add(cwd, origin string) error {
 		}
 	}
 
-	_ = tmux.SetWindowOption(windowID, "@llm_opencode", "1")
+	_ = tmux.SetWindowOption(windowID, "@llm_agent", "1")
 	_ = tmux.SetWindowOption(windowID, "@llm_path", abs)
-	_ = tmux.RenameWindow(windowID, "opencode")
+	_ = tmux.RenameWindow(windowID, filepath.Base(command))
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
 
 	if originSession != "" && originSession != sessionName {

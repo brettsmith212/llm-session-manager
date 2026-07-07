@@ -1,11 +1,12 @@
 # llm-session-manager
 
-`llmux` is a small CLI that manages tmux sessions for LLM coding agents (Claude Code, OpenCode, Codex, etc.) and tracks per-session state (`working` / `waiting` / `idle`).
+`llmux` is a small CLI that manages tmux sessions for LLM coding agents (Claude Code, OpenCode, Amp, Codex, etc.) and tracks per-session state (`working` / `waiting` / `idle`).
 
-It pairs with two thin plugins that translate agent lifecycle events into `llmux state` calls:
+It pairs with thin plugins that translate agent lifecycle events into `llmux state` calls:
 
 - **`plugins/claude/`** — Claude Code plugin (this repo)
 - **`opencode/llmux-plugin/`** — OpenCode plugin (lives in your nix-config)
+- Amp plugin — TypeScript plugin using Amp's Plugin API `ThreadState` observable (lives in your nix-config)
 
 ## Install
 

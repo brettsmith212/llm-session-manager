@@ -38,12 +38,12 @@ func SetState(state types.State) error {
 		return fmt.Errorf("empty window id from pane")
 	}
 
-	// Mark this window as hosting an opencode if it isn't already.
+	// Mark this window as hosting a managed agent if it isn't already.
 	// Skip for warm-only sessions (never attached) — they stay hidden
 	// from the picker until launch/add promotes them.
-	if tmux.GetWindowOption(windowID, "@llm_opencode") == "" {
+	if tmux.GetWindowOption(windowID, "@llm_agent") == "" {
 		if tmux.GetSessionOption(session, "@llm_ever_attached") != "" {
-			if err := tmux.SetWindowOption(windowID, "@llm_opencode", "1"); err != nil {
+			if err := tmux.SetWindowOption(windowID, "@llm_agent", "1"); err != nil {
 				return err
 			}
 		}

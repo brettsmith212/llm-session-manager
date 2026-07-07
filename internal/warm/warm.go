@@ -1,6 +1,7 @@
 package warm
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,10 @@ import (
 // evicted by warming.
 func Warm(cwd string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	command := tmux.GetGlobalOption("@llm_command", "opencode")
+	command := tmux.GetGlobalOption("@llm_command", "")
+	if command == "" {
+		return fmt.Errorf("@llm_command is not set; set it in tmux.conf (e.g. 'set -g @llm_command \"amp\"')")
+	}
 	capStr := tmux.GetGlobalOption("@llm_warm_cap", "5")
 	cap, err := strconv.Atoi(capStr)
 	if err != nil || cap < 0 {
@@ -45,10 +49,9 @@ func Warm(cwd string) error {
 		return err
 	}
 
-	// Hide from the picker: do NOT set @llm_opencode (the picker filter keys
+	// Hide from the picker: do NOT set @llm_agent (the picker filter keys
 	// on it). Disable auto-rename so tmux doesn't relabel the window after
-	// the running command and trip the picker's window-name fallback. Name
-	// the window "warm" explicitly.
+	// the running command. Name the window "warm" explicitly.
 	_ = tmux.SetWindowOption(sessionName+":0", "automatic-rename", "off")
 	_ = tmux.RenameWindow(sessionName+":0", "warm")
 	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)

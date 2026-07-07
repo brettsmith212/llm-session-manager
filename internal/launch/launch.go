@@ -2,6 +2,7 @@ package launch
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"llm-session-manager/internal/sessions"
@@ -11,7 +12,10 @@ import (
 // Launch creates or reuses a session for cwd and opens it in a popup.
 func Launch(cwd, origin string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	command := tmux.GetGlobalOption("@llm_command", "opencode")
+	command := tmux.GetGlobalOption("@llm_command", "")
+	if command == "" {
+		return fmt.Errorf("@llm_command is not set; set it in tmux.conf (e.g. 'set -g @llm_command \"amp\"')")
+	}
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
 
@@ -37,10 +41,10 @@ func Launch(cwd, origin string) error {
 	// Promote the session: visible in the picker, protected from warm
 	// eviction, window named correctly. Runs on both the create path and
 	// the warm fast path (when a background warm session already exists).
-	_ = tmux.SetWindowOption(sessionName+":0", "@llm_opencode", "1")
+	_ = tmux.SetWindowOption(sessionName+":0", "@llm_agent", "1")
 	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
-	_ = tmux.RenameWindow(sessionName+":0", "opencode")
+	_ = tmux.RenameWindow(sessionName+":0", filepath.Base(command))
 
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {
 		return err

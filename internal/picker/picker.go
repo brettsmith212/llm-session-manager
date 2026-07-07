@@ -407,18 +407,18 @@ func (p *picker) killSelected() {
 
 	_ = tmux.KillWindow(session.Name + ":" + session.WindowID)
 
-	// If the parent session has no opencode windows left, clean it up too.
-	remaining := tmux.RunRaw([]string{"list-windows", "-t", session.Name, "-F", "#{@llm_opencode}"})
-	hasOpencode := false
+	// If the parent session has no agent windows left, clean it up too.
+	remaining := tmux.RunRaw([]string{"list-windows", "-t", session.Name, "-F", "#{@llm_agent}"})
+	hasAgent := false
 	if remaining.ExitCode == 0 && remaining.Stdout != "" {
 		for _, line := range strings.Split(remaining.Stdout, "\n") {
 			if strings.TrimSpace(line) != "" {
-				hasOpencode = true
+				hasAgent = true
 				break
 			}
 		}
 	}
-	if !hasOpencode {
+	if !hasAgent {
 		_ = tmux.KillSession(session.Name)
 	}
 

@@ -16,7 +16,7 @@ import (
 // StaleSeconds is the grace period after which "working" is downgraded to "idle".
 const StaleSeconds = 300
 
-const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_opencode}\t#{window_name}"
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -69,8 +69,8 @@ func EffectiveState(s types.Session) types.State {
 	return s.State
 }
 
-// GetAllSessions fetches all managed windows (one per opencode) across all
-// managed tmux sessions, grouped and sorted by session then window index.
+// GetAllSessions fetches all managed agent windows across all managed tmux
+// sessions, grouped and sorted by session then window index.
 func GetAllSessions(prefix string) []types.Session {
 	result := tmux.RunRaw([]string{"list-windows", "-a", "-F", windowFormat})
 	if result.ExitCode != 0 || result.Stdout == "" {
@@ -83,18 +83,16 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 10)
-		if len(parts) < 10 {
+		parts := strings.SplitN(line, "\t", 9)
+		if len(parts) < 9 {
 			continue
 		}
 
-		// parts[8] is @llm_opencode and parts[9] is window_name.
-		// Prefer the explicit marker, but fall back to the auto-renamed window
-		// name for backwards compatibility with sessions created before this
-		// change and for windows where opencode has started but not yet emitted
-		// its first plugin event.
-		windowName := parts[9]
-		if parts[8] == "" && windowName != "opencode" {
+		// parts[8] is @llm_agent — the marker that this window hosts a managed
+		// LLM agent (claude, opencode, amp, etc.). Set immediately by
+		// launch/add on session creation. Warm-only sessions intentionally
+		// don't have it and stay hidden from the picker.
+		if parts[8] == "" {
 			continue
 		}
 
