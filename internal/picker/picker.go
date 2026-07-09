@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/term"
 
+	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
@@ -124,10 +125,37 @@ func (p *picker) filtered() []types.Session {
 	return out
 }
 
+// formatBadge renders an agent name as colored text (no brackets, no
+// background) — just the agent name in its assigned color. Used for the
+// per-row agent indicator.
+func formatBadge(agentName string, color ansi.RGB) string {
+	if agentName == "" {
+		agentName = "?"
+	}
+	return ansi.Foreground(color) + agentName + ansi.Reset
+}
+
+// truncateVisible truncates a plain string (no ansi) so the total visible
+// width of prefix+str+suffix fits maxVisible cells. Truncation appends "…"
+// to str to signal the cut.
+func truncateVisible(str, prefix, suffix string, maxVisible int) string {
+	avail := maxVisible - len(prefix) - len(suffix)
+	if avail >= len(str) {
+		return str
+	}
+	if avail <= 0 {
+		return ""
+	}
+	if avail == 1 {
+		return "…"
+	}
+	return str[:avail-1] + "…"
+}
+
 func (p *picker) snapshot() string {
 	parts := make([]string, len(p.sessions))
 	for i, s := range p.sessions {
-		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%d:%s", s.Name, s.WindowID, s.WindowIndex, s.State, s.StateAt, s.Path)
+		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%d:%s:%s", s.Name, s.WindowID, s.WindowIndex, s.State, s.StateAt, s.Path, s.WindowName)
 	}
 	return strings.Join(parts, "|")
 }
@@ -140,7 +168,7 @@ func (p *picker) render() {
 	}
 
 	const itemHeight = 1
-	const headerRows = 6
+	const headerRows = 7
 	// Leave extra room because each new session group adds a header row.
 	visibleCount := max(1, (rows-headerRows-2)/(itemHeight+1))
 
@@ -186,6 +214,22 @@ func (p *picker) render() {
 	}
 	row++
 
+	// Active agent — bright always so you can see at a glance which tool
+	// new sessions will boot with. The name is color-coded to match the
+	// per-row agent badge (opencode=blue, claude=orange, amp=red, …).
+	active := agent.Active()
+	if active == "" {
+		writeLine(row, cols, fmt.Sprintf("  %sagent:%s %s(not configured)%s",
+			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+			ansi.Foreground(ansi.Red), ansi.Reset))
+	} else {
+		writeLine(row, cols, fmt.Sprintf("  %sagent:%s %s%s%s %s▾%s",
+			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+			ansi.Foreground(agent.BadgeColor(active)), active, ansi.Reset,
+			ansi.Foreground(ansi.Surface2), ansi.Reset))
+	}
+	row++
+
 	// Help — dimmed to overlay0 (with cancelled accent glyphs) when the
 	// picker is blurred so the eye is drawn away to the preview pane.
 	helpAccent := ansi.Foreground(ansi.Surface2)
@@ -194,7 +238,8 @@ func (p *picker) render() {
 		helpAccent = ansi.Foreground(ansi.Overlay0)
 		helpMuted = ansi.Foreground(ansi.Crust)
 	}
-	help1 := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s   %s⏎%s %sopen%s",
+	help1 := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s   %s⏎%s %sopen%s   %ss%s %sswitch agent%s",
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
@@ -254,7 +299,15 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 	stateStr := string(sessions.EffectiveState(session))
 	sc := stateColor(stateStr)
 	ago := sessions.FormatAgo(session.StateAt)
-	nameStr := truncate(fmt.Sprintf("%s · #%d", session.Name, session.WindowIndex), inner)
+
+	// Visible row layout: "● working  2m  [opencode] #0". The badge uses the
+	// agent identity (tmux window name, set by launch/add/warm), color-coded
+	// per-agent so you can tell at a glance which sessions are running which
+	// tool. Truncate only the agent name itself (never the "[…]" brackets or
+	// " #index" suffix) so the badge always reads as a badge.
+	agentName := session.WindowName
+	suffixStr := fmt.Sprintf(" #%d", session.WindowIndex)
+	agentName = truncateVisible(agentName, "", suffixStr, inner)
 
 	connector := "├─"
 	if isLastInGroup {
@@ -269,14 +322,18 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 	// also dropped (no bg fill) so an inactive selection doesn't scream.
 	if !active {
 		dim := ansi.Foreground(ansi.Overlay0)
-		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s  %s%s%s",
-			dim, connector, ansi.Reset,
-			dim, dim, statePadded, ansi.Reset,
-			dim, ago,
-			dim, nameStr, ansi.Reset)
+		badge := formatBadge(agentName, ansi.Overlay0)
+		line1 := "  " +
+			dim + connector + ansi.Reset + " " +
+			dim + "● " + dim + statePadded + ansi.Reset + "  " +
+			dim + ago + ansi.Reset + "  " +
+			badge + dim + suffixStr + ansi.Reset
 		writeLine(row, cols, line1)
 		return row + 1
 	}
+
+	badgeColor := agent.BadgeColor(session.WindowName)
+	badge := formatBadge(agentName, badgeColor)
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
@@ -284,7 +341,11 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 		txt := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay2)
 
-		line1 := fmt.Sprintf("  %s%s %s● %s%s  %s%s  %s%s", accent, connector, dot, txt, statePadded, muted, ago, muted, nameStr)
+		line1 := "  " +
+			accent + connector + " " +
+			dot + "● " + txt + statePadded + "  " +
+			muted + ago + "  " +
+			badge + muted + suffixStr
 
 		writeLineBg(row, cols, line1, ansi.Surface0)
 	} else {
@@ -293,7 +354,11 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 		txt := ansi.Foreground(ansi.Subtext0)
 		muted := ansi.Foreground(ansi.Overlay0)
 
-		line1 := fmt.Sprintf("  %s%s%s %s● %s%s%s  %s%s  %s%s%s", tree, connector, ansi.Reset, dot, txt, statePadded, ansi.Reset, muted, ago, muted, nameStr, ansi.Reset)
+		line1 := "  " +
+			tree + connector + ansi.Reset + " " +
+			dot + "● " + txt + statePadded + ansi.Reset + "  " +
+			muted + ago + ansi.Reset + "  " +
+			badge + muted + suffixStr + ansi.Reset
 
 		writeLine(row, cols, line1)
 	}
@@ -327,16 +392,6 @@ func writeLineBg(row, cols int, content string, bg ansi.RGB) {
 
 func listWidth(cols int) int {
 	return cols
-}
-
-func truncate(str string, width int) string {
-	if len(str) <= width {
-		return str
-	}
-	if width <= 1 {
-		return "…"
-	}
-	return str[:width-1] + "…"
 }
 
 func (p *picker) updatePreview(session types.Session) {
@@ -457,6 +512,15 @@ func (p *picker) killSelected() {
 	p.render()
 }
 
+// cycleAgent rotates the global @llm_active_agent to the next entry in
+// the catalog and re-renders so the header reflects the new choice. Only
+// affects new sessions — already-running sessions keep their agent.
+func (p *picker) cycleAgent() {
+	agent.Cycle()
+	p.activateErr = ""
+	p.render()
+}
+
 func (p *picker) handleKeys(data string) (done bool) {
 	keys := parseKeys(data)
 	for _, key := range keys {
@@ -484,6 +548,8 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.render()
 		case "a":
 			p.openCreatePopup()
+		case "s":
+			p.cycleAgent()
 		case "\x18": // ^x
 			p.killSelected()
 			if len(p.sessions) == 0 {

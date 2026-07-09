@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 )
@@ -15,9 +16,9 @@ import (
 // window selected.
 func Add(cwd, origin string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	command := tmux.GetGlobalOption("@llm_command", "")
+	command := agent.Active()
 	if command == "" {
-		return fmt.Errorf("@llm_command is not set; set it in tmux.conf (e.g. 'set -g @llm_command \"amp\"')")
+		return agent.ErrNotConfigured()
 	}
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")

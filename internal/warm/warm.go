@@ -1,12 +1,12 @@
 package warm
 
 import (
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 )
@@ -21,9 +21,9 @@ import (
 // evicted by warming.
 func Warm(cwd string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	command := tmux.GetGlobalOption("@llm_command", "")
+	command := agent.Active()
 	if command == "" {
-		return fmt.Errorf("@llm_command is not set; set it in tmux.conf (e.g. 'set -g @llm_command \"amp\"')")
+		return agent.ErrNotConfigured()
 	}
 	capStr := tmux.GetGlobalOption("@llm_warm_cap", "5")
 	cap, err := strconv.Atoi(capStr)

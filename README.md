@@ -49,6 +49,40 @@ llmux list                         # list sessions (used by the picker)
 llmux state <working|waiting|idle> # update session state from a hook
 ```
 
+### Tmux options
+
+All configuration is done via tmux global options (`set -g @... ...` in
+`tmux.conf`). None are strictly required — `llmux` boots with sane
+defaults — but you'll usually want to set at least `@llm_command` so new
+sessions know which agent to launch.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `@llm_command` | *(unset)* | Agent binary launched for new sessions when no runtime override is active. Setting this is the minimum configuration; `llmux` falls back to this even after the picker toggles to a new agent and the tmux server restarts. |
+| `@llm_agents` | `opencode claude amp` | Space-separated list of agents the picker cycles through. Add new ones here when you install a new tool. Falls back to the hardcoded list when unset. |
+| `@llm_session_prefix` | `llm-` | Prefix for managed tmux session names. Sessions are named `<prefix><sha256(path)[:8]>`. |
+| `@llm_popup_width` | `90%` | Width of the popup opened by `launch`/`add`. Any tmux size spec. |
+| `@llm_popup_height` | `90%` | Height of the popup opened by `launch`/`add`. |
+| `@llm_warm_cap` | `5` | Max number of warm-only background sessions. `0` = unlimited. Oldest evicted LRU-style. |
+| `@llm_parent` | *(unset)* | Target tmux client for popup anchoring. Set automatically by the tmux binding; usually not set manually. |
+
+A minimal `tmux.conf` block:
+
+```tmux
+set -g @llm_command 'opencode'
+set -g @llm_agents 'opencode claude amp'
+```
+
+### Switching agents
+
+Open the picker (`Ctrl+a u`) and press `s` to cycle the active agent. The
+current choice is shown in the picker header — `agent: opencode ▾`,
+color-coded to match the per-row badge. Only **new** sessions pick up the
+change: existing sessions keep running whatever agent they booted with, so
+you can have opencode sessions and a fresh claude session side by side in
+the picker. The override lives in `@llm_active_agent`, a runtime tmux
+option, so a fresh tmux server silently reverts to `@llm_command`.
+
 ### Pre-warming
 
 Add one of these lines to your `.zshrc` or `.bashrc` (depending on your shell)

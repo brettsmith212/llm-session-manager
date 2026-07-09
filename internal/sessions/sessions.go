@@ -16,7 +16,7 @@ import (
 // StaleSeconds is the grace period after which "working" is downgraded to "idle".
 const StaleSeconds = 300
 
-const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}"
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -83,7 +83,7 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 9)
+		parts := strings.SplitN(line, "\t", 10)
 		if len(parts) < 9 {
 			continue
 		}
@@ -101,6 +101,10 @@ func GetAllSessions(prefix string) []types.Session {
 		windowIndex := 0
 		if n, err := strconv.Atoi(parts[2]); err == nil {
 			windowIndex = n
+		}
+		windowName := ""
+		if len(parts) > 9 {
+			windowName = parts[9]
 		}
 
 		state := types.State(parts[3])
@@ -126,6 +130,7 @@ func GetAllSessions(prefix string) []types.Session {
 			Name:        name,
 			WindowID:    windowID,
 			WindowIndex: windowIndex,
+			WindowName:  windowName,
 			State:       state,
 			StateAt:     stateAt,
 			Path:        path,
