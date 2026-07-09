@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,19 +34,18 @@ func Run(defaultPath, origin string) error {
 	fmt.Print(ansi.HideCursor)
 	defer fmt.Print(ansi.ShowCursor)
 
-	input := make(chan string, 16)
-	go readInput(input)
-
+	reader := bufio.NewReader(os.Stdin)
 	render(path, cursor, errMsg)
 
 	for {
-		select {
-		case keys := <-input:
-			if done := handleKey(keys, &path, &cursor, &errMsg, origin); done {
-				return nil
-			}
-			render(path, cursor, errMsg)
+		keys, err := readKey(reader)
+		if err != nil {
+			return nil
 		}
+		if done := handleKey(keys, &path, &cursor, &errMsg, origin, oldState); done {
+			return nil
+		}
+		render(path, cursor, errMsg)
 	}
 }
 
@@ -59,7 +59,7 @@ func render(path string, cursor int, errMsg string) {
 
 	const title = "  Create new session"
 	const label = "  Create in: "
-	const help = "  Enter to create  ·  Ctrl-C to cancel"
+	const help = "  Enter to create  ·  Ctrl-C to cancel  ·  Ctrl-U clear  ·  Ctrl-T fzf"
 
 	writeLine(2, cols, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Blue)+ansi.Bold, title, ansi.Reset))
 
@@ -127,7 +127,7 @@ func writeLine(row, cols int, content string) {
 	_ = cols
 }
 
-func handleKey(keys string, path *string, cursor *int, errMsg *string, origin string) bool {
+func handleKey(keys string, path *string, cursor *int, errMsg *string, origin string, oldState *term.State) bool {
 	if len(keys) == 0 {
 		return false
 	}
@@ -143,8 +143,21 @@ func handleKey(keys string, path *string, cursor *int, errMsg *string, origin st
 		}
 		submit(abs, origin)
 		return true
+	case code == 21: // ctrl-u: clear entire line
+		*path = ""
+		*cursor = 0
+		*errMsg = ""
 	case code == 9: // tab
 		completePath(path, cursor)
+		*errMsg = ""
+	case code == 20: // ctrl-t: fzf directory search
+		selected, err := runFZF(*path, oldState)
+		if err != nil {
+			*errMsg = err.Error()
+			return false
+		}
+		*path = selected
+		*cursor = len(selected)
 		*errMsg = ""
 	case code == 127 || code == 8: // backspace
 		if *cursor > 0 {
@@ -317,33 +330,96 @@ func binaryPath() string {
 	return os.Args[0]
 }
 
-func readInput(out chan<- string) {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		b, err := reader.ReadByte()
+func readKey(reader *bufio.Reader) (string, error) {
+	b, err := reader.ReadByte()
+	if err != nil {
+		return "", err
+	}
+
+	var buf strings.Builder
+	buf.WriteByte(b)
+
+	// If this looks like the start of an escape sequence, try to read the rest.
+	if b == '\x1b' {
+		// Read the byte after ESC with a generous deadline. Tmux may hold
+		// the second byte briefly while it decides whether the key is bound.
+		_ = os.Stdin.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		next, err := reader.ReadByte()
+		_ = os.Stdin.SetReadDeadline(time.Time{})
 		if err != nil {
-			return
+			return buf.String(), nil
+		}
+		buf.WriteByte(next)
+
+		// ESC + printable byte (not [ or O) is a simple Alt+<key>. Return
+		// immediately so Alt-C and friends feel snappy.
+		if next != '[' && next != 'O' {
+			return buf.String(), nil
 		}
 
-		var buf strings.Builder
-		buf.WriteByte(b)
-
-		if b == '\x1b' {
+		// CSI / SS3 sequence: keep reading until the final byte.
+		_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+		for {
+			next, err := reader.ReadByte()
+			_ = os.Stdin.SetReadDeadline(time.Time{})
+			if err != nil {
+				break
+			}
+			buf.WriteByte(next)
+			if next >= 0x40 && next <= 0x7e {
+				break
+			}
 			_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-			for {
-				next, err := reader.ReadByte()
-				_ = os.Stdin.SetReadDeadline(time.Time{})
-				if err != nil {
-					break
-				}
-				buf.WriteByte(next)
-				if next >= 0x40 && next <= 0x7e && buf.Len() > 2 {
-					break
-				}
-				_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+		}
+	}
+
+	return buf.String(), nil
+}
+
+func runFZF(currentPath string, oldState *term.State) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if err := term.Restore(fd, oldState); err != nil {
+		return currentPath, err
+	}
+	fmt.Print(ansi.ShowCursor)
+
+	if _, err := exec.LookPath("fzf"); err != nil {
+		_, _ = term.MakeRaw(fd)
+		fmt.Print(ansi.HideCursor)
+		return currentPath, fmt.Errorf("fzf not found in PATH")
+	}
+
+	cmd := exec.Command("bash", "-c",
+		`${FZF_ALT_C_COMMAND:-fd --type d --absolute-path . 2>/dev/null || find . -type d -print} | fzf --prompt="dir> " --height=100%`)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	err := cmd.Run()
+
+	_, _ = term.MakeRaw(fd)
+	fmt.Print(ansi.HideCursor)
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
+			if code == 1 || code == 130 {
+				// No selection (1) or cancelled (130): keep current path.
+				return currentPath, nil
 			}
 		}
-
-		out <- buf.String()
+		return currentPath, err
 	}
+
+	selected := strings.TrimSpace(out.String())
+	if selected == "" {
+		return currentPath, nil
+	}
+
+	abs, err := filepath.Abs(selected)
+	if err != nil {
+		return selected, nil
+	}
+	return abs, nil
 }
