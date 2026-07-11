@@ -1,5 +1,5 @@
 {
-  description = "LLM-agnostic tmux session manager (llmux) and Claude Code plugin";
+  description = "LLM-agnostic tmux session manager (llmux) and agent plugins";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -19,11 +19,13 @@
         {
           default = pkgs.callPackage ./default.nix { };
           claude-plugin = pkgs.callPackage ./claude-plugin.nix { };
+          amp-plugin = pkgs.callPackage ./amp-plugin.nix { };
         });
 
       overlays = forEachSystem (system: (final: prev: {
         llmux = self.packages.${system}.default;
         llmux-claude-plugin = self.packages.${system}.claude-plugin;
+        llmux-amp-plugin = self.packages.${system}.amp-plugin;
       }));
     };
 }

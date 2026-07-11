@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -23,6 +24,7 @@ import (
 const (
 	windowName            = "llm-picker"
 	pickerSelectionOption = "@llm_picker_selection"
+	previewDelay          = 75 * time.Millisecond
 )
 
 // Run starts the ANSI session picker.
@@ -38,9 +40,13 @@ func Run() error {
 		query:         "",
 		selectedIndex: 0,
 		isSearching:   false,
-		pickerActive:  true,
 		popupClosed:   make(chan struct{}, 1),
 	}
+	p.previewTimer = time.NewTimer(time.Hour)
+	if !p.previewTimer.Stop() {
+		<-p.previewTimer.C
+	}
+	defer p.previewTimer.Stop()
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -61,18 +67,11 @@ func Run() error {
 	input := make(chan string, 16)
 	go readInput(input)
 
-	// ── B: poll which pane the user has focused (picker left vs preview
-	// right). The picker pane (.0) is the only one reading keys, but tmux
-	// flips pane_active when the user clicks / Ctrl-arrows into the preview.
-	// We sample pane_active every ~150ms and re-render on change so the
-	// in-canvas header reflects reality.
-	activeChange := make(chan bool, 4)
-	go pollPaneActive(activeChange)
-
+	// Paint the interactive pane before doing any tmux work for the preview.
+	p.render()
 	if first := p.filtered(); len(first) > 0 {
 		p.updatePreview(first[0])
 	}
-	p.render()
 
 	lastSnapshot := p.snapshot()
 
@@ -87,9 +86,12 @@ func Run() error {
 			if snap != lastSnapshot || selectedCreated {
 				lastSnapshot = snap
 				p.render()
+				if len(p.filtered()) == 0 {
+					p.cancelPreview()
+				}
 			}
 			if !selectedCreated && !hadSessions && len(next) > 0 && p.selectedIndex < len(next) {
-				p.updatePreview(next[p.selectedIndex])
+				p.queuePreview(next[p.selectedIndex])
 			}
 		case <-p.popupClosed:
 			p.sessions = sessions.GetAllSessions(prefix)
@@ -98,11 +100,8 @@ func Run() error {
 			p.render()
 		case <-resize:
 			p.render()
-		case active := <-activeChange:
-			if active != p.pickerActive {
-				p.pickerActive = active
-				p.render()
-			}
+		case <-p.previewTimer.C:
+			p.flushPreview()
 		case keys := <-input:
 			if done := p.handleKeys(keys); done {
 				return nil
@@ -112,22 +111,25 @@ func Run() error {
 }
 
 type picker struct {
-	prefix        string
-	parent        string
-	sessions      []types.Session
-	query         string
-	selectedIndex int
-	isSearching   bool
-	searchStart   string
-	searchIndex   int
-	isPasting     bool
-	pickerActive  bool   // true when left pane (.0) is the active tmux pane
-	activateErr   string // set when activateSession fails to reach the origin window
-	confirmStopID string
-	confirmLabel  string
-	notice        string
-	noticeError   bool
-	popupClosed   chan struct{}
+	prefix            string
+	parent            string
+	sessions          []types.Session
+	query             string
+	selectedIndex     int
+	isSearching       bool
+	searchStart       string
+	searchIndex       int
+	isPasting         bool
+	activateErr       string // set when activateSession fails to reach the origin window
+	confirmStopID     string
+	confirmLabel      string
+	notice            string
+	noticeError       bool
+	popupClosed       chan struct{}
+	previewTimer      *time.Timer
+	pendingPreview    types.Session
+	hasPendingPreview bool
+	previewWindowID   string
 }
 
 func (p *picker) filtered() []types.Session {
@@ -168,8 +170,9 @@ func formatBadge(agentName string, color ansi.RGB) string {
 // width of prefix+str+suffix fits maxVisible cells. Truncation appends "…"
 // to str to signal the cut.
 func truncateVisible(str, prefix, suffix string, maxVisible int) string {
-	avail := maxVisible - len(prefix) - len(suffix)
-	if avail >= len(str) {
+	avail := maxVisible - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
+	runes := []rune(str)
+	if avail >= len(runes) {
 		return str
 	}
 	if avail <= 0 {
@@ -178,7 +181,7 @@ func truncateVisible(str, prefix, suffix string, maxVisible int) string {
 	if avail == 1 {
 		return "…"
 	}
-	return str[:avail-1] + "…"
+	return string(runes[:avail-1]) + "…"
 }
 
 func (p *picker) snapshot() string {
@@ -195,117 +198,71 @@ func (p *picker) render() {
 	if err != nil {
 		cols, rows = 80, 24
 	}
-
-	const itemHeight = 1
-	const headerRows = 7
-	// Leave extra room because each new session group adds a header row.
-	visibleCount := max(1, (rows-headerRows-2)/(itemHeight+1))
+	cols = max(1, cols)
+	rows = max(1, rows)
 
 	if p.selectedIndex >= len(list) {
 		p.selectedIndex = max(0, len(list)-1)
 	}
-	startIndex := max(0, min(p.selectedIndex, max(0, len(list)-visibleCount)))
-	visible := list[startIndex:min(len(list), startIndex+visibleCount)]
 
-	fmt.Print(ansi.ClearScreen)
-
-	row := 1
-	// Title — bright blue bar when picker is focused; muted hint bar when
-	// the user has moved focus into the preview pane on the right.
-	if p.pickerActive {
-		writeLineBg(row, cols, fmt.Sprintf(" %s%s◆ Sessions%s", ansi.Foreground(ansi.Base), ansi.Bold, ansi.Reset), ansi.Blue)
-	} else {
-		writeLineBg(row, cols,
-			fmt.Sprintf(" %s%s◀ focus picker%s   %spreview active — ← to return%s",
-				ansi.Foreground(ansi.Overlay2), ansi.Bold, ansi.Reset,
-				ansi.Foreground(ansi.Overlay0), ansi.Reset),
-			ansi.Surface0)
+	frame := newScreenFrame(cols, rows)
+	position := 0
+	if len(list) > 0 {
+		position = p.selectedIndex + 1
 	}
-	row++
-
-	// Counter / search
-	if p.isSearching {
-		writeLine(row, cols, fmt.Sprintf("  %s/%s%s%s%s_%s",
-			ansi.Foreground(ansi.Overlay0),
-			ansi.Reset,
-			ansi.Foreground(ansi.Text),
-			p.query,
-			ansi.Foreground(ansi.Blue),
-			ansi.Reset))
-	} else {
-		position := 0
-		if len(list) > 0 {
-			position = p.selectedIndex + 1
+	waiting := 0
+	for _, session := range p.sessions {
+		if sessions.EffectiveState(session) == types.Waiting {
+			waiting++
 		}
-		counter := fmt.Sprintf("  %s%d%s/%s%d%s",
-			ansi.Foreground(ansi.Overlay2), position,
-			ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Overlay2), len(list), ansi.Reset)
-		if p.query != "" {
-			counter += fmt.Sprintf("  %sfilter: %s%s%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Text), p.query, ansi.Reset)
-		}
-		waiting := 0
-		for _, session := range p.sessions {
-			if sessions.EffectiveState(session) == types.Waiting {
-				waiting++
-			}
-		}
-		if waiting > 0 {
-			counter += fmt.Sprintf("  %s◆ %d needs you%s", ansi.Foreground(ansi.Yellow), waiting, ansi.Reset)
-		}
-		writeLine(row, cols, counter)
 	}
-	row++
 
-	// Active agent — bright always so you can see at a glance which tool
-	// new sessions will boot with. The name is color-coded to match the
-	// per-row agent badge (opencode=blue, claude=orange, amp=red, …).
+	header := fmt.Sprintf(" %s%s◆ Sessions%s  %s%d/%d%s",
+		ansi.Foreground(ansi.Blue), ansi.Bold, ansi.Reset,
+		ansi.Foreground(ansi.Overlay2), position, len(list), ansi.Reset)
+	if waiting > 0 {
+		header += fmt.Sprintf("  %s◆ %d needs you%s", ansi.Foreground(ansi.Yellow), waiting, ansi.Reset)
+	}
 	active := agent.Active()
 	if active == "" {
-		writeLine(row, cols, fmt.Sprintf("  %sagent:%s %s(not configured)%s",
-			ansi.Foreground(ansi.Overlay0), ansi.Reset,
-			ansi.Foreground(ansi.Red), ansi.Reset))
+		header += fmt.Sprintf("  %sagent %snot configured%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Red), ansi.Reset)
 	} else {
-		writeLine(row, cols, fmt.Sprintf("  %sagent:%s %s%s%s %s▾%s",
+		header += fmt.Sprintf("  %sagent%s %s%s%s %s▾%s",
 			ansi.Foreground(ansi.Overlay0), ansi.Reset,
 			ansi.Foreground(agent.BadgeColor(active)), active, ansi.Reset,
-			ansi.Foreground(ansi.Surface2), ansi.Reset))
+			ansi.Foreground(ansi.Surface2), ansi.Reset)
 	}
-	row++
+	frame.lineBg(1, header, ansi.Surface0)
 
-	// Help — dimmed to overlay0 (with cancelled accent glyphs) when the
-	// picker is blurred so the eye is drawn away to the preview pane.
-	helpAccent := ansi.Foreground(ansi.Surface2)
-	helpMuted := ansi.Foreground(ansi.Overlay0)
-	if !p.pickerActive {
-		helpAccent = ansi.Foreground(ansi.Overlay0)
-		helpMuted = ansi.Foreground(ansi.Crust)
+	if p.isSearching {
+		frame.line(2, fmt.Sprintf("  %s/%s%s%s%s_%s  %sesc cancel · enter keep%s",
+			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+			ansi.Foreground(ansi.Text), p.query,
+			ansi.Foreground(ansi.Blue), ansi.Reset,
+			ansi.Foreground(ansi.Overlay0), ansi.Reset))
+	} else if p.query != "" {
+		frame.line(2, fmt.Sprintf("  %sfilter:%s %s%s%s  %sesc clear · / replace%s",
+			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+			ansi.Foreground(ansi.Text), p.query, ansi.Reset,
+			ansi.Foreground(ansi.Overlay0), ansi.Reset))
+	} else {
+		frame.line(2, fmt.Sprintf("  %s↑↓%s %snavigate · %s⏎%s %sopen · %s/%s %sfilter%s",
+			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
+			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
+			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset))
 	}
-	help1 := fmt.Sprintf("  %s↑↓%s %snav%s  %s/%s %sfind%s   %s⏎%s %sopen%s   %ss%s %sswitch agent%s",
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
-	help2 := fmt.Sprintf("  %sa%s %sadd%s   %sn%s %sneeds you%s   %s^x%s %sstop%s  %sq%s %squit%s",
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
-		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
-	writeLine(row, cols, help1)
-	row++
-	writeLine(row, cols, help2)
-	row++
+	frame.line(3, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Surface0), strings.Repeat("─", max(0, cols-4)), ansi.Reset))
 
-	// Divider
-	div := fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Surface0), strings.Repeat("─", min(listWidth(cols)-4, cols-4)), ansi.Reset)
-	writeLine(row, cols, div)
-	row++
-
+	row := 4
 	if p.confirmStopID != "" {
-		writeLine(row, cols, fmt.Sprintf("  %sstop %s? press ^x again to confirm · esc cancels%s",
-			ansi.Foreground(ansi.Yellow), p.confirmLabel, ansi.Reset))
+		const confirmationSuffix = "?  ^x confirm · esc cancel"
+		labelWidth := max(1, cols-utf8.RuneCountInString("  stop "+confirmationSuffix))
+		label := truncateVisible(p.confirmLabel, "", "", labelWidth)
+		frame.line(row, fmt.Sprintf("  %sstop %s%s%s",
+			ansi.Foreground(ansi.Yellow), label, confirmationSuffix, ansi.Reset))
 		row++
 	} else if p.activateErr != "" {
-		writeLine(row, cols, fmt.Sprintf("  %scouldn't switch to parent window: %s%s",
+		frame.line(row, fmt.Sprintf("  %scouldn't switch to parent: %s%s",
 			ansi.Foreground(ansi.Red), p.activateErr, ansi.Reset))
 		row++
 	} else if p.notice != "" {
@@ -313,59 +270,97 @@ func (p *picker) render() {
 		if p.noticeError {
 			color = ansi.Red
 		}
-		writeLine(row, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(color), p.notice, ansi.Reset))
+		frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(color), p.notice, ansi.Reset))
 		row++
 	}
 
-	if len(visible) == 0 {
-		if p.query != "" {
-			writeLine(row, cols, fmt.Sprintf("  %sno matches — press %sesc%s to clear the filter%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
-		} else {
-			writeLine(row, cols, fmt.Sprintf("  %sno sessions — press %sa%s to create%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+	footerRow := rows
+	if rows >= 6 {
+		footer := "  a add · n needs you · s agent · ^x stop · q close"
+		if cols < 60 {
+			footer = "  a add · n next · s agent · ^x stop · q"
 		}
+		frame.line(footerRow, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Overlay0), footer, ansi.Reset))
+	} else {
+		footerRow = rows + 1
+	}
+
+	availableRows := max(0, footerRow-row)
+	startIndex, endIndex := visibleRange(list, p.selectedIndex, availableRows)
+	if startIndex == endIndex {
+		if len(list) == 0 {
+			if p.query != "" {
+				frame.line(row, fmt.Sprintf("  %sno matches · %sesc%s clears the filter%s",
+					ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+			} else {
+				frame.line(row, fmt.Sprintf("  %sno sessions · press %sa%s to create one%s",
+					ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+			}
+		}
+		frame.flush()
 		return
 	}
 
 	var prevSession string
-	for i, session := range visible {
-		if session.Name != prevSession {
+	for index := startIndex; index < endIndex && row < footerRow; index++ {
+		session := list[index]
+		if availableRows > 1 && session.Name != prevSession {
 			path := sessions.FormatPath(session.Path)
 			if path == "" {
 				path = session.Name
 			}
-			pathColor := ansi.Blue
-			if !p.pickerActive {
-				pathColor = ansi.Overlay0
-			}
-			header := fmt.Sprintf("  %s%s%s", ansi.Foreground(pathColor), path, ansi.Reset)
-			writeLine(row, cols, header)
+			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), path, ansi.Reset))
 			row++
 			prevSession = session.Name
 		}
-		selected := startIndex+i == p.selectedIndex
-		isLastInGroup := i == len(visible)-1 || visible[i+1].Name != session.Name
-		row = drawItem(session, cols, selected, row, isLastInGroup, p.pickerActive)
-		if i < len(visible)-1 && visible[i+1].Name != session.Name {
-			writeLine(row, cols, "")
-			row++
+		if row >= footerRow {
+			break
 		}
+		isLastInGroup := index == len(list)-1 || list[index+1].Name != session.Name
+		row = drawItem(frame, session, cols, index == p.selectedIndex, row, isLastInGroup)
 	}
+	frame.flush()
 }
 
-func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool, active bool) int {
-	inner := cols - 24
+func visibleRange(list []types.Session, selected, maxRows int) (start, end int) {
+	if len(list) == 0 || maxRows < 1 {
+		return 0, 0
+	}
+	selected = max(0, min(selected, len(list)-1))
+	if maxRows == 1 {
+		return selected, selected + 1
+	}
+	start, end = selected, selected+1
+	for start > 0 && renderedListRows(list[start-1:end]) <= maxRows {
+		start--
+	}
+	for end < len(list) && renderedListRows(list[start:end+1]) <= maxRows {
+		end++
+	}
+	return start, end
+}
+
+func renderedListRows(list []types.Session) int {
+	rows := len(list)
+	previous := ""
+	for _, session := range list {
+		if session.Name != previous {
+			rows++
+			previous = session.Name
+		}
+	}
+	return rows
+}
+
+func drawItem(frame *screenFrame, session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
 	state := sessions.EffectiveState(session)
 	stateSymbol, stateLabel, stateColor := statePresentation(state)
 	ago := sessions.FormatAgo(session.StateAt)
-
-	// Visible row layout: "● working  2m  [opencode] #0". The badge uses the
-	// agent identity (tmux window name, set by launch/add/warm), color-coded
-	// per-agent so you can tell at a glance which sessions are running which
-	// tool. Truncate only the agent name itself (never the "[…]" brackets or
-	// " #index" suffix) so the badge always reads as a badge.
 	agentName := session.WindowName
+	if agentName == "" {
+		agentName = "?"
+	}
 	suffixStr := fmt.Sprintf(" #%d", session.WindowIndex)
-	agentName = truncateVisible(agentName, "", suffixStr, inner)
 
 	connector := "├─"
 	if isLastInGroup {
@@ -373,25 +368,26 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 	}
 
 	statePadded := fmt.Sprintf("%-9s", stateLabel)
-
-	// ── C: when the picker pane is blurred, dim the entire list to a single
-	// overlay0 tone so the left side reads as "asleep" and the eye is drawn
-	// to the now-active preview pane on the right. Selection highlight is
-	// also dropped (no bg fill) so an inactive selection doesn't scream.
-	if !active {
-		dim := ansi.Foreground(ansi.Overlay0)
-		badge := formatBadge(agentName, ansi.Overlay0)
-		line1 := "  " +
-			dim + connector + ansi.Reset + " " +
-			dim + stateSymbol + " " + dim + statePadded + ansi.Reset + "  " +
-			dim + ago + ansi.Reset + "  " +
-			badge + dim + suffixStr + ansi.Reset
-		writeLine(row, cols, line1)
-		return row + 1
+	baseWidth := 16 // indent + connector + symbol + padded state
+	available := max(0, cols-baseWidth-utf8.RuneCountInString(suffixStr))
+	detailPrefix := ""
+	if available >= utf8.RuneCountInString(ago)+7 {
+		detailPrefix = "  " + ago + "  "
+	} else if available >= 4 {
+		detailPrefix = "  "
+	} else if available >= 2 {
+		detailPrefix = " "
+	}
+	agentWidth := max(0, available-utf8.RuneCountInString(detailPrefix))
+	agentName = truncateVisible(agentName, "", "", agentWidth)
+	if agentName == "" {
+		detailPrefix = ""
 	}
 
-	badgeColor := agent.BadgeColor(session.WindowName)
-	badge := formatBadge(agentName, badgeColor)
+	badge := ""
+	if agentName != "" {
+		badge = formatBadge(agentName, agent.BadgeColor(session.WindowName))
+	}
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
@@ -401,11 +397,11 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 
 		line1 := "  " +
 			accent + connector + " " +
-			dot + stateSymbol + " " + txt + statePadded + "  " +
-			muted + ago + "  " +
+			dot + stateSymbol + " " + txt + statePadded +
+			muted + detailPrefix +
 			badge + ansi.Background(ansi.Surface0) + muted + suffixStr
 
-		writeLineBg(row, cols, line1, ansi.Surface0)
+		frame.lineBg(row, line1, ansi.Surface0)
 	} else {
 		tree := ansi.Foreground(ansi.Blue)
 		dot := ansi.Foreground(stateColor)
@@ -414,11 +410,11 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 
 		line1 := "  " +
 			tree + connector + ansi.Reset + " " +
-			dot + stateSymbol + " " + txt + statePadded + ansi.Reset + "  " +
-			muted + ago + ansi.Reset + "  " +
+			dot + stateSymbol + " " + txt + statePadded + ansi.Reset +
+			muted + detailPrefix + ansi.Reset +
 			badge + muted + suffixStr + ansi.Reset
 
-		writeLine(row, cols, line1)
+		frame.line(row, line1)
 	}
 
 	return row + 1
@@ -437,19 +433,155 @@ func statePresentation(state types.State) (symbol, label string, color ansi.RGB)
 	}
 }
 
-func writeLine(row, cols int, content string) {
-	fmt.Printf("%s%s%s%s", ansi.CursorPos(row, 1), ansi.ClearLine(), content, ansi.Reset)
+type screenLine struct {
+	content       string
+	background    ansi.RGB
+	hasBackground bool
 }
 
-func writeLineBg(row, cols int, content string, bg ansi.RGB) {
-	bgSeq := ansi.Background(bg)
-	fmt.Printf("%s%s%s%s%s%s%s%s",
-		ansi.CursorPos(row, 1), bgSeq, strings.Repeat(" ", cols), ansi.Reset,
-		ansi.CursorPos(row, 1), bgSeq, content, ansi.Reset)
+type screenFrame struct {
+	cols  int
+	rows  int
+	lines []screenLine
 }
 
-func listWidth(cols int) int {
-	return cols
+func newScreenFrame(cols, rows int) *screenFrame {
+	return &screenFrame{cols: cols, rows: rows, lines: make([]screenLine, rows)}
+}
+
+func (f *screenFrame) line(row int, content string) {
+	if row < 1 || row > f.rows {
+		return
+	}
+	f.lines[row-1] = screenLine{content: content}
+}
+
+func (f *screenFrame) lineBg(row int, content string, background ansi.RGB) {
+	if row < 1 || row > f.rows {
+		return
+	}
+	f.lines[row-1] = screenLine{content: content, background: background, hasBackground: true}
+}
+
+func (f *screenFrame) flush() {
+	var out strings.Builder
+	out.Grow(f.rows * (f.cols + 24))
+	for row, line := range f.lines {
+		out.WriteString(ansi.CursorPos(row+1, 1))
+		out.WriteString(ansi.ClearLine())
+		content := line.content
+		if line.hasBackground {
+			background := ansi.Background(line.background)
+			out.WriteString(background)
+			out.WriteString(strings.Repeat(" ", f.cols))
+			out.WriteString(ansi.Reset)
+			out.WriteString(ansi.CursorPos(row+1, 1))
+			out.WriteString(background)
+			content = strings.ReplaceAll(content, ansi.Reset, ansi.Reset+background)
+		}
+		out.WriteString(fitANSI(content, f.cols))
+		out.WriteString(ansi.Reset)
+	}
+	_, _ = os.Stdout.WriteString(out.String())
+}
+
+func fitANSI(value string, maxWidth int) string {
+	if maxWidth <= 0 || value == "" {
+		return ""
+	}
+	if ansiWidth(value) <= maxWidth {
+		return value
+	}
+
+	var out strings.Builder
+	width := 0
+	target := maxWidth - 1
+	for i := 0; i < len(value) && width < target; {
+		if value[i] == '\x1b' && i+1 < len(value) && value[i+1] == '[' {
+			end := i + 2
+			for end < len(value) {
+				end++
+				if value[end-1] >= 0x40 && value[end-1] <= 0x7e {
+					break
+				}
+			}
+			out.WriteString(value[i:end])
+			i = end
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(value[i:])
+		out.WriteString(value[i : i+size])
+		i += size
+		width++
+	}
+	out.WriteString("…")
+	return out.String()
+}
+
+func ansiWidth(value string) int {
+	width := 0
+	for i := 0; i < len(value); {
+		if value[i] == '\x1b' && i+1 < len(value) && value[i+1] == '[' {
+			i += 2
+			for i < len(value) {
+				final := value[i] >= 0x40 && value[i] <= 0x7e
+				i++
+				if final {
+					break
+				}
+			}
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(value[i:])
+		i += size
+		width++
+	}
+	return width
+}
+
+func (p *picker) queuePreview(session types.Session) {
+	if session.WindowID == p.previewWindowID {
+		p.cancelPreview()
+		return
+	}
+	p.pendingPreview = session
+	p.hasPendingPreview = true
+	if !p.previewTimer.Stop() {
+		select {
+		case <-p.previewTimer.C:
+		default:
+		}
+	}
+	p.previewTimer.Reset(previewDelay)
+}
+
+func (p *picker) cancelPreview() {
+	p.hasPendingPreview = false
+	if !p.previewTimer.Stop() {
+		select {
+		case <-p.previewTimer.C:
+		default:
+		}
+	}
+}
+
+func (p *picker) flushPreview() {
+	if !p.hasPendingPreview {
+		return
+	}
+	session := p.pendingPreview
+	p.hasPendingPreview = false
+	p.updatePreview(session)
+}
+
+func (p *picker) renderSelection() {
+	p.render()
+	list := p.filtered()
+	if p.selectedIndex >= len(list) {
+		p.cancelPreview()
+		return
+	}
+	p.queuePreview(list[p.selectedIndex])
 }
 
 func (p *picker) updatePreview(session types.Session) {
@@ -459,17 +591,22 @@ func (p *picker) updatePreview(session types.Session) {
 		return
 	}
 	panes := strings.Fields(result.Stdout)
+	updated := false
 	if len(panes) > 1 {
-		_ = tmux.RunRaw([]string{"respawn-pane", "-k", "-t", ":" + windowName + ".1", cmd})
+		updated = tmux.RunRaw([]string{"respawn-pane", "-k", "-t", ":" + windowName + ".1", cmd}).ExitCode == 0
 	} else {
-		_, _ = tmux.Run([]string{"split-window", "-h", "-l", "67%", "-t", ":" + windowName + ".0", cmd})
+		_, err := tmux.Run([]string{"split-window", "-d", "-h", "-l", "67%", "-t", ":" + windowName + ".0", cmd})
+		updated = err == nil
+	}
+	if !updated {
+		return
 	}
 	// Refresh the preview pane title with the live name + window index so
 	// the "▶ Preview · …" border label always tracks what is shown there.
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
 		fmt.Sprintf("▶ Preview · %s · %s #%d", projectName(session), session.WindowName, session.WindowIndex),
 		"-t", ":" + windowName + ".1"})
-	_, _ = tmux.Run([]string{"select-pane", "-t", ":" + windowName + ".0"})
+	p.previewWindowID = session.WindowID
 }
 
 func (p *picker) changeSelection(delta int) {
@@ -479,10 +616,7 @@ func (p *picker) changeSelection(delta int) {
 	p.notice = ""
 	list := p.filtered()
 	p.selectedIndex = max(0, min(len(list)-1, p.selectedIndex+delta))
-	if p.selectedIndex < len(list) {
-		p.updatePreview(list[p.selectedIndex])
-	}
-	p.render()
+	p.renderSelection()
 }
 
 func (p *picker) selectNextWaiting() {
@@ -520,8 +654,7 @@ func (p *picker) selectNextWaiting() {
 		p.selectedIndex = index
 		p.notice = ""
 		p.activateErr = ""
-		p.updatePreview(list[index])
-		p.render()
+		p.renderSelection()
 		return
 	}
 	p.notice = "no sessions need attention"
@@ -565,7 +698,7 @@ func (p *picker) selectCreatedSession() bool {
 		p.confirmLabel = ""
 		p.notice = ""
 		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
-		p.updatePreview(session)
+		p.queuePreview(session)
 		return true
 	}
 	return false
@@ -671,10 +804,7 @@ func (p *picker) killSelected() {
 	if p.selectedIndex >= len(next) {
 		p.selectedIndex = max(0, len(next)-1)
 	}
-	if len(next) > 0 && p.selectedIndex < len(next) {
-		p.updatePreview(next[p.selectedIndex])
-	}
-	p.render()
+	p.renderSelection()
 }
 
 // cycleAgent rotates the global @llm_active_agent to the next entry in
@@ -751,10 +881,7 @@ func (p *picker) handleKeys(data string) (done bool) {
 				p.query = ""
 				p.selectedIndex = 0
 				p.notice = ""
-				if list := p.filtered(); len(list) > 0 {
-					p.updatePreview(list[0])
-				}
-				p.render()
+				p.renderSelection()
 				continue
 			}
 			_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
@@ -779,9 +906,8 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 		p.selectedIndex = p.searchIndex
 		if list := p.filtered(); len(list) > 0 {
 			p.selectedIndex = min(p.selectedIndex, len(list)-1)
-			p.updatePreview(list[p.selectedIndex])
 		}
-		p.render()
+		p.renderSelection()
 	case code == 13: // enter: keep the current filter
 		p.isSearching = false
 		p.render()
@@ -790,17 +916,11 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 			p.query = p.query[:len(p.query)-1]
 		}
 		p.selectedIndex = 0
-		if list := p.filtered(); len(list) > 0 {
-			p.updatePreview(list[0])
-		}
-		p.render()
+		p.renderSelection()
 	case code >= 32 && code <= 126:
 		p.query += key
 		p.selectedIndex = 0
-		if list := p.filtered(); len(list) > 0 {
-			p.updatePreview(list[0])
-		}
-		p.render()
+		p.renderSelection()
 	}
 	return false
 }
@@ -950,22 +1070,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// pollPaneActive reports whether the picker pane (.0) is the active tmux
-// pane. It sends the current value once on startup, then pushes only on
-// change so the render loop sleeps idle otherwise.
-func pollPaneActive(out chan<- bool) {
-	last := true
-	out <- last
-	t := time.NewTicker(150 * time.Millisecond)
-	defer t.Stop()
-	for range t.C {
-		res := tmux.RunRaw([]string{"display-message", "-p", "-t", windowName + ".0", "#{pane_active}"})
-		active := strings.TrimSpace(res.Stdout) == "1"
-		if active != last {
-			last = active
-			out <- active
-		}
-	}
 }

@@ -6,7 +6,7 @@ It pairs with thin plugins that translate agent lifecycle events into `llmux sta
 
 - **`plugins/claude/`** — Claude Code plugin (this repo)
 - **`opencode/llmux-plugin/`** — OpenCode plugin (lives in your nix-config)
-- Amp plugin — TypeScript plugin using Amp's Plugin API `ThreadState` observable (lives in your nix-config)
+- **`plugins/amp/`** — Amp plugin using its `ThreadState` observable and command palette
 
 ## Install
 
@@ -33,11 +33,25 @@ home.file.".claude/plugins/llm-session-manager" = {
 };
 ```
 
+### Install the Amp plugin
+
+```nix
+xdg.configFile."amp/plugins/llmux-state.ts".source =
+  "${inputs.llmux.packages.${pkgs.system}.amp-plugin}/share/amp/plugins/llmux-state.ts";
+```
+
+The plugin reports Amp's `working`, `waiting`, and `idle` states to llmux. It
+also adds **llmux: Open session picker** to Amp's command palette (`Ctrl+O`).
+
+Without Nix, copy `plugins/amp/llmux-state.ts` to
+`~/.config/amp/plugins/llmux-state.ts`, then run **plugins: reload** in Amp.
+
 ## Build standalone
 
 ```bash
 nix build .#llmux           # the binary
 nix build .#claude-plugin   # the Claude Code plugin
+nix build .#amp-plugin      # the Amp plugin
 ```
 
 ## Usage
