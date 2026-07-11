@@ -356,7 +356,7 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 			accent + connector + " " +
 			dot + "● " + txt + statePadded + "  " +
 			muted + ago + "  " +
-			badge + muted + suffixStr
+			badge + ansi.Background(ansi.Surface0) + muted + suffixStr
 
 		writeLineBg(row, cols, line1, ansi.Surface0)
 	} else {
