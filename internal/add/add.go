@@ -32,6 +32,7 @@ func Add(cwd, origin string) error {
 	sessionName := sessions.SessionNameForPath(abs, prefix)
 
 	var windowID string
+	agentName := agent.Name(command)
 	if !tmux.HasSession(sessionName) {
 		result, err := tmux.Run([]string{"new-session", "-dP", "-s", sessionName, "-c", abs, "-F", "#{window_id}", command})
 		if err != nil {
@@ -49,6 +50,13 @@ func Add(cwd, origin string) error {
 				return fmt.Errorf("failed to resolve warm window: %w", err)
 			}
 			windowID = wid
+			if warmAgent := tmux.GetWindowOption(windowID, "@llm_warm_agent"); warmAgent != "" {
+				agentName = warmAgent
+			} else if startCommand, err := tmux.DisplayMessage("#{pane_start_command}", windowID); err == nil && agent.Name(startCommand) != "" {
+				agentName = agent.Name(startCommand)
+			} else if currentCommand, err := tmux.DisplayMessage("#{pane_current_command}", windowID); err == nil && currentCommand != "" {
+				agentName = currentCommand
+			}
 		} else {
 			result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
 			if err != nil {
@@ -72,9 +80,9 @@ func Add(cwd, origin string) error {
 		}
 	}
 
-	_ = tmux.SetWindowOption(windowID, "@llm_agent", "1")
+	_ = tmux.SetWindowOption(windowID, "@llm_agent", agentName)
 	_ = tmux.SetWindowOption(windowID, "@llm_path", abs)
-	_ = tmux.RenameWindow(windowID, filepath.Base(command))
+	_ = tmux.RenameWindow(windowID, agentName)
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
 
 	if originSession != "" && originSession != sessionName {

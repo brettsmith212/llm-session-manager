@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"llm-session-manager/internal/ansi"
@@ -52,6 +53,16 @@ func Active() string {
 		return a
 	}
 	return tmux.GetGlobalOption("@llm_command", "")
+}
+
+// Name returns the executable basename used to identify an agent in the
+// picker. Commands may be configured as absolute paths or include arguments.
+func Name(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return filepath.Base(strings.Trim(fields[0], `"'`))
 }
 
 // Cycle rotates @llm_active_agent to the next entry in the catalog and

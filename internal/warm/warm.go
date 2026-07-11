@@ -54,6 +54,7 @@ func Warm(cwd string) error {
 	// the running command. Name the window "warm" explicitly.
 	_ = tmux.SetWindowOption(sessionName+":0", "automatic-rename", "off")
 	_ = tmux.RenameWindow(sessionName+":0", "warm")
+	_ = tmux.SetWindowOption(sessionName+":0", "@llm_warm_agent", agent.Name(command))
 	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	_ = tmux.SetSessionOption(sessionName, "@llm_warmed_at",
 		strconv.FormatInt(time.Now().UnixNano(), 10))

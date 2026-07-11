@@ -2,7 +2,6 @@ package launch
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"llm-session-manager/internal/agent"
@@ -33,19 +32,38 @@ func Launch(cwd, origin string) error {
 
 	sessionName := sessions.SessionNameForPath(cwd, prefix)
 
+	created := false
 	if !tmux.HasSession(sessionName) {
 		if err := tmux.NewSession(sessionName, cwd, command); err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
+		created = true
 	}
 
 	// Promote the session: visible in the picker, protected from warm
-	// eviction, window named correctly. Runs on both the create path and
-	// the warm fast path (when a background warm session already exists).
-	_ = tmux.SetWindowOption(sessionName+":0", "@llm_agent", "1")
+	// eviction, window named correctly. An established session keeps the
+	// identity of the agent it is already running; the globally active agent
+	// only controls newly created sessions.
+	window := sessionName + ":0"
+	agentName := ""
+	if created {
+		agentName = agent.Name(command)
+	} else if tmux.GetSessionOption(sessionName, "@llm_ever_attached") == "" {
+		agentName = tmux.GetWindowOption(window, "@llm_warm_agent")
+		if agentName == "" {
+			startCommand, _ := tmux.DisplayMessage("#{pane_start_command}", window)
+			agentName = agent.Name(startCommand)
+		}
+		if agentName == "" {
+			agentName, _ = tmux.DisplayMessage("#{pane_current_command}", window)
+		}
+	}
+	if agentName != "" {
+		_ = tmux.SetWindowOption(window, "@llm_agent", agentName)
+		_ = tmux.RenameWindow(window, agentName)
+	}
 	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
-	_ = tmux.RenameWindow(sessionName+":0", filepath.Base(command))
 
 	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {
 		return err

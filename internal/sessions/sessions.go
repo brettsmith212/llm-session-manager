@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/tmux"
 	"llm-session-manager/internal/types"
 )
@@ -16,7 +17,7 @@ import (
 // StaleSeconds is the grace period after which "working" is downgraded to "idle".
 const StaleSeconds = 300
 
-const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}"
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}\t#{pane_current_command}\t#{pane_start_command}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -83,15 +84,16 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 10)
+		parts := strings.SplitN(line, "\t", 12)
 		if len(parts) < 9 {
 			continue
 		}
 
 		// parts[8] is @llm_agent — the marker that this window hosts a managed
-		// LLM agent (claude, opencode, amp, etc.). Set immediately by
-		// launch/add on session creation. Warm-only sessions intentionally
-		// don't have it and stay hidden from the picker.
+		// LLM agent and, for newly created windows, its stable identity.
+		// Legacy windows used "1" as the marker; infer those from the stable
+		// pane start command, then the live command, before using the mutable
+		// window name as a last resort.
 		if parts[8] == "" {
 			continue
 		}
@@ -103,7 +105,13 @@ func GetAllSessions(prefix string) []types.Session {
 			windowIndex = n
 		}
 		windowName := ""
-		if len(parts) > 9 {
+		if parts[8] != "1" {
+			windowName = parts[8]
+		} else if len(parts) > 11 && agent.Name(parts[11]) != "" {
+			windowName = agent.Name(parts[11])
+		} else if len(parts) > 10 && parts[10] != "" {
+			windowName = parts[10]
+		} else if len(parts) > 9 {
 			windowName = parts[9]
 		}
 
