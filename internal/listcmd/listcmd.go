@@ -43,6 +43,7 @@ func ListCommand(clientName string) error {
 	}
 
 	allSessions := sessions.GetAllSessions(prefix)
+	_ = sessions.PublishWaitingStatus(allSessions)
 
 	bin := binaryPath()
 	ts := ""
@@ -86,7 +87,7 @@ func ListCommand(clientName string) error {
 	borderOpts := [][2]string{
 		{"pane-border-status", "top"},
 		{"pane-border-format", " #{pane_title} "},
-		{"pane-border-style", "fg=#6c7086"},            // Catppuccin Overlay0
+		{"pane-border-style", "fg=#6c7086"},             // Catppuccin Overlay0
 		{"pane-active-border-style", "fg=#89b4fa,bold"}, // Catppuccin Blue
 		{"pane-border-lines", "heavy"},
 	}

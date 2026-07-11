@@ -27,11 +27,13 @@ var (
 )
 
 const (
-	Reset      = "\x1b[0m"
-	Bold       = "\x1b[1m"
-	ClearScreen = "\x1b[2J\x1b[H"
-	HideCursor  = "\x1b[?25l"
-	ShowCursor  = "\x1b[?25h"
+	Reset             = "\x1b[0m"
+	Bold              = "\x1b[1m"
+	ClearScreen       = "\x1b[2J\x1b[H"
+	HideCursor        = "\x1b[?25l"
+	ShowCursor        = "\x1b[?25h"
+	BracketedPasteOn  = "\x1b[?2004h"
+	BracketedPasteOff = "\x1b[?2004l"
 )
 
 // Foreground returns a 24-bit foreground ANSI sequence.

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,28 @@ func EffectiveState(s types.Session) types.State {
 		}
 	}
 	return s.State
+}
+
+// PublishWaitingStatus updates the lightweight tmux options used by status
+// bars to show when an agent needs attention. The display value is empty when
+// no sessions are waiting, so embedding #{@llm_status} adds no idle clutter.
+func PublishWaitingStatus(all []types.Session) error {
+	waiting := 0
+	for _, session := range all {
+		if EffectiveState(session) == types.Waiting {
+			waiting++
+		}
+	}
+
+	count := strconv.Itoa(waiting)
+	status := ""
+	if waiting > 0 {
+		status = fmt.Sprintf("◆ %d needs you", waiting)
+	}
+	if err := tmux.SetGlobalOption("@llm_waiting_count", count); err != nil {
+		return err
+	}
+	return tmux.SetGlobalOption("@llm_status", status)
 }
 
 // GetAllSessions fetches all managed agent windows across all managed tmux
@@ -146,7 +169,12 @@ func GetAllSessions(prefix string) []types.Session {
 		})
 	}
 
-	sort.Slice(sessions, func(i, j int) bool {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		leftPath := strings.ToLower(filepath.Clean(sessions[i].Path))
+		rightPath := strings.ToLower(filepath.Clean(sessions[j].Path))
+		if leftPath != rightPath {
+			return leftPath < rightPath
+		}
 		if sessions[i].Name != sessions[j].Name {
 			return sessions[i].Name < sessions[j].Name
 		}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 	"llm-session-manager/internal/types"
 )
@@ -52,5 +53,8 @@ func SetState(state types.State) error {
 	if err := tmux.SetWindowOption(windowID, "@llm_state", string(state)); err != nil {
 		return err
 	}
-	return tmux.SetWindowOption(windowID, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix()))
+	if err := tmux.SetWindowOption(windowID, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix())); err != nil {
+		return err
+	}
+	return sessions.PublishWaitingStatus(sessions.GetAllSessions(prefix))
 }

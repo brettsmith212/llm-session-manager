@@ -71,7 +71,14 @@ A minimal `tmux.conf` block:
 ```tmux
 set -g @llm_command 'opencode'
 set -g @llm_agents 'opencode claude amp'
+
+# Optional ambient indicator; llmux keeps @llm_status updated and leaves it
+# empty when no sessions need attention.
+set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
 ```
+
+`llmux` also maintains the numeric `@llm_waiting_count` option for custom
+status formats. Both values update whenever an agent reports a state change.
 
 ### Switching agents
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -47,8 +48,8 @@ func Run() error {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	fmt.Print(ansi.HideCursor)
-	defer fmt.Print(ansi.ShowCursor)
+	fmt.Print(ansi.HideCursor + ansi.BracketedPasteOn)
+	defer fmt.Print(ansi.BracketedPasteOff + ansi.ShowCursor)
 
 	resize := make(chan os.Signal, 1)
 	signal.Notify(resize, syscall.SIGWINCH)
@@ -117,19 +118,36 @@ type picker struct {
 	query         string
 	selectedIndex int
 	isSearching   bool
+	searchStart   string
+	searchIndex   int
+	isPasting     bool
 	pickerActive  bool   // true when left pane (.0) is the active tmux pane
 	activateErr   string // set when activateSession fails to reach the origin window
+	confirmStopID string
+	confirmLabel  string
+	notice        string
+	noticeError   bool
 	popupClosed   chan struct{}
 }
 
 func (p *picker) filtered() []types.Session {
-	q := strings.ToLower(p.query)
-	if q == "" {
+	terms := strings.Fields(strings.ToLower(p.query))
+	if len(terms) == 0 {
 		return p.sessions
 	}
 	out := make([]types.Session, 0, len(p.sessions))
 	for _, s := range p.sessions {
-		if strings.Contains(strings.ToLower(s.Path), q) || strings.Contains(strings.ToLower(s.Name), q) {
+		_, stateLabel, _ := statePresentation(sessions.EffectiveState(s))
+		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s #%d",
+			s.Path, s.Name, s.WindowName, stateLabel, s.WindowIndex))
+		matches := true
+		for _, term := range terms {
+			if !strings.Contains(haystack, term) {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			out = append(out, s)
 		}
 	}
@@ -215,11 +233,24 @@ func (p *picker) render() {
 			ansi.Foreground(ansi.Blue),
 			ansi.Reset))
 	} else {
+		position := 0
+		if len(list) > 0 {
+			position = p.selectedIndex + 1
+		}
 		counter := fmt.Sprintf("  %s%d%s/%s%d%s",
-			ansi.Foreground(ansi.Overlay2), p.selectedIndex+1,
+			ansi.Foreground(ansi.Overlay2), position,
 			ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Overlay2), len(list), ansi.Reset)
 		if p.query != "" {
 			counter += fmt.Sprintf("  %sfilter: %s%s%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Text), p.query, ansi.Reset)
+		}
+		waiting := 0
+		for _, session := range p.sessions {
+			if sessions.EffectiveState(session) == types.Waiting {
+				waiting++
+			}
+		}
+		if waiting > 0 {
+			counter += fmt.Sprintf("  %s◆ %d needs you%s", ansi.Foreground(ansi.Yellow), waiting, ansi.Reset)
 		}
 		writeLine(row, cols, counter)
 	}
@@ -254,7 +285,8 @@ func (p *picker) render() {
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
-	help2 := fmt.Sprintf("  %sa%s %sadd%s   %s^x%s %skill%s  %sq%s %squit%s",
+	help2 := fmt.Sprintf("  %sa%s %sadd%s   %sn%s %sneeds you%s   %s^x%s %sstop%s  %sq%s %squit%s",
+		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset,
 		helpAccent, ansi.Reset, helpMuted, ansi.Reset)
@@ -268,14 +300,29 @@ func (p *picker) render() {
 	writeLine(row, cols, div)
 	row++
 
-	if p.activateErr != "" {
+	if p.confirmStopID != "" {
+		writeLine(row, cols, fmt.Sprintf("  %sstop %s? press ^x again to confirm · esc cancels%s",
+			ansi.Foreground(ansi.Yellow), p.confirmLabel, ansi.Reset))
+		row++
+	} else if p.activateErr != "" {
 		writeLine(row, cols, fmt.Sprintf("  %scouldn't switch to parent window: %s%s",
 			ansi.Foreground(ansi.Red), p.activateErr, ansi.Reset))
+		row++
+	} else if p.notice != "" {
+		color := ansi.Green
+		if p.noticeError {
+			color = ansi.Red
+		}
+		writeLine(row, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(color), p.notice, ansi.Reset))
 		row++
 	}
 
 	if len(visible) == 0 {
-		writeLine(row, cols, fmt.Sprintf("  %sno sessions — press %sa%s to create%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+		if p.query != "" {
+			writeLine(row, cols, fmt.Sprintf("  %sno matches — press %sesc%s to clear the filter%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+		} else {
+			writeLine(row, cols, fmt.Sprintf("  %sno sessions — press %sa%s to create%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Overlay0), ansi.Reset))
+		}
 		return
 	}
 
@@ -307,8 +354,8 @@ func (p *picker) render() {
 
 func drawItem(session types.Session, cols int, selected bool, row int, isLastInGroup bool, active bool) int {
 	inner := cols - 24
-	stateStr := string(sessions.EffectiveState(session))
-	sc := stateColor(stateStr)
+	state := sessions.EffectiveState(session)
+	stateSymbol, stateLabel, stateColor := statePresentation(state)
 	ago := sessions.FormatAgo(session.StateAt)
 
 	// Visible row layout: "● working  2m  [opencode] #0". The badge uses the
@@ -325,7 +372,7 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 		connector = "└─"
 	}
 
-	statePadded := fmt.Sprintf("%-7s", stateStr)
+	statePadded := fmt.Sprintf("%-9s", stateLabel)
 
 	// ── C: when the picker pane is blurred, dim the entire list to a single
 	// overlay0 tone so the left side reads as "asleep" and the eye is drawn
@@ -336,7 +383,7 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 		badge := formatBadge(agentName, ansi.Overlay0)
 		line1 := "  " +
 			dim + connector + ansi.Reset + " " +
-			dim + "● " + dim + statePadded + ansi.Reset + "  " +
+			dim + stateSymbol + " " + dim + statePadded + ansi.Reset + "  " +
 			dim + ago + ansi.Reset + "  " +
 			badge + dim + suffixStr + ansi.Reset
 		writeLine(row, cols, line1)
@@ -348,26 +395,26 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 
 	if selected {
 		accent := ansi.Foreground(ansi.Blue)
-		dot := ansi.Foreground(sc)
+		dot := ansi.Foreground(stateColor)
 		txt := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay2)
 
 		line1 := "  " +
 			accent + connector + " " +
-			dot + "● " + txt + statePadded + "  " +
+			dot + stateSymbol + " " + txt + statePadded + "  " +
 			muted + ago + "  " +
 			badge + ansi.Background(ansi.Surface0) + muted + suffixStr
 
 		writeLineBg(row, cols, line1, ansi.Surface0)
 	} else {
 		tree := ansi.Foreground(ansi.Blue)
-		dot := ansi.Foreground(sc)
+		dot := ansi.Foreground(stateColor)
 		txt := ansi.Foreground(ansi.Subtext0)
 		muted := ansi.Foreground(ansi.Overlay0)
 
 		line1 := "  " +
 			tree + connector + ansi.Reset + " " +
-			dot + "● " + txt + statePadded + ansi.Reset + "  " +
+			dot + stateSymbol + " " + txt + statePadded + ansi.Reset + "  " +
 			muted + ago + ansi.Reset + "  " +
 			badge + muted + suffixStr + ansi.Reset
 
@@ -377,16 +424,16 @@ func drawItem(session types.Session, cols int, selected bool, row int, isLastInG
 	return row + 1
 }
 
-func stateColor(state string) ansi.RGB {
+func statePresentation(state types.State) (symbol, label string, color ansi.RGB) {
 	switch state {
-	case "working":
-		return ansi.Red
-	case "idle":
-		return ansi.Green
-	case "waiting":
-		return ansi.Yellow
+	case types.Waiting:
+		return "◆", "needs you", ansi.Yellow
+	case types.Working:
+		return "●", "working", ansi.Blue
+	case types.Idle:
+		return "·", "idle", ansi.Overlay0
 	default:
-		return ansi.Overlay0
+		return "·", "starting", ansi.Overlay0
 	}
 }
 
@@ -420,19 +467,84 @@ func (p *picker) updatePreview(session types.Session) {
 	// Refresh the preview pane title with the live name + window index so
 	// the "▶ Preview · …" border label always tracks what is shown there.
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
-		fmt.Sprintf("▶ Preview · %s #%d", session.Name, session.WindowIndex),
+		fmt.Sprintf("▶ Preview · %s · %s #%d", projectName(session), session.WindowName, session.WindowIndex),
 		"-t", ":" + windowName + ".1"})
 	_, _ = tmux.Run([]string{"select-pane", "-t", ":" + windowName + ".0"})
 }
 
 func (p *picker) changeSelection(delta int) {
 	p.activateErr = ""
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+	p.notice = ""
 	list := p.filtered()
 	p.selectedIndex = max(0, min(len(list)-1, p.selectedIndex+delta))
 	if p.selectedIndex < len(list) {
 		p.updatePreview(list[p.selectedIndex])
 	}
 	p.render()
+}
+
+func (p *picker) selectNextWaiting() {
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+	currentID := ""
+	filtered := p.filtered()
+	if p.selectedIndex < len(filtered) {
+		currentID = filtered[p.selectedIndex].WindowID
+	}
+
+	// Attention navigation is intentionally global. A committed project or
+	// agent filter should never hide a session that needs the user.
+	p.query = ""
+	list := p.sessions
+	if len(list) == 0 {
+		p.notice = "no sessions need attention"
+		p.noticeError = false
+		p.render()
+		return
+	}
+	start := -1
+	for i, session := range list {
+		if session.WindowID == currentID {
+			start = i
+			break
+		}
+	}
+	p.selectedIndex = max(0, start)
+	for offset := 1; offset <= len(list); offset++ {
+		index := (start + offset) % len(list)
+		if sessions.EffectiveState(list[index]) != types.Waiting {
+			continue
+		}
+		p.selectedIndex = index
+		p.notice = ""
+		p.activateErr = ""
+		p.updatePreview(list[index])
+		p.render()
+		return
+	}
+	p.notice = "no sessions need attention"
+	p.noticeError = false
+	p.render()
+}
+
+func projectName(session types.Session) string {
+	if session.Path != "" {
+		name := filepath.Base(filepath.Clean(session.Path))
+		if name != "" && name != "." {
+			return name
+		}
+	}
+	return session.Name
+}
+
+func sessionLabel(session types.Session) string {
+	agentName := session.WindowName
+	if agentName == "" {
+		agentName = "agent"
+	}
+	return fmt.Sprintf("%s · %s #%d", projectName(session), agentName, session.WindowIndex)
 }
 
 // selectCreatedSession consumes the window ID left by the create prompt and
@@ -449,6 +561,9 @@ func (p *picker) selectCreatedSession() bool {
 		p.query = ""
 		p.selectedIndex = i
 		p.activateErr = ""
+		p.confirmStopID = ""
+		p.confirmLabel = ""
+		p.notice = ""
 		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
 		p.updatePreview(session)
 		return true
@@ -512,8 +627,25 @@ func (p *picker) killSelected() {
 		return
 	}
 	session := list[p.selectedIndex]
+	label := sessionLabel(session)
 
-	_ = tmux.KillWindow(session.Name + ":" + session.WindowID)
+	if sessions.EffectiveState(session) != types.Idle && p.confirmStopID != session.WindowID {
+		p.confirmStopID = session.WindowID
+		p.confirmLabel = label
+		p.notice = ""
+		p.activateErr = ""
+		p.render()
+		return
+	}
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+
+	if err := tmux.KillWindow(session.Name + ":" + session.WindowID); err != nil {
+		p.notice = fmt.Sprintf("couldn't stop %s: %s", label, err)
+		p.noticeError = true
+		p.render()
+		return
+	}
 
 	// If the parent session has no agent windows left, clean it up too.
 	remaining := tmux.RunRaw([]string{"list-windows", "-t", session.Name, "-F", "#{@llm_agent}"})
@@ -531,14 +663,15 @@ func (p *picker) killSelected() {
 	}
 
 	p.sessions = sessions.GetAllSessions(p.prefix)
-	if len(p.sessions) == 0 {
-		_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
-		return
+	_ = sessions.PublishWaitingStatus(p.sessions)
+	p.notice = "stopped " + label
+	p.noticeError = false
+	p.activateErr = ""
+	next := p.filtered()
+	if p.selectedIndex >= len(next) {
+		p.selectedIndex = max(0, len(next)-1)
 	}
-	if p.selectedIndex >= len(p.sessions) {
-		p.selectedIndex = max(0, len(p.sessions)-1)
-	}
-	if next := p.filtered(); len(next) > 0 && p.selectedIndex < len(next) {
+	if len(next) > 0 && p.selectedIndex < len(next) {
 		p.updatePreview(next[p.selectedIndex])
 	}
 	p.render()
@@ -550,12 +683,26 @@ func (p *picker) killSelected() {
 func (p *picker) cycleAgent() {
 	agent.Cycle()
 	p.activateErr = ""
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+	p.notice = ""
 	p.render()
 }
 
 func (p *picker) handleKeys(data string) (done bool) {
 	keys := parseKeys(data)
 	for _, key := range keys {
+		switch key {
+		case "\x1b[200~":
+			p.isPasting = true
+			continue
+		case "\x1b[201~":
+			p.isPasting = false
+			continue
+		}
+		if p.isPasting && !p.isSearching {
+			continue
+		}
 		if p.isSearching {
 			done := p.handleSearchKey(key)
 			if done {
@@ -574,20 +721,45 @@ func (p *picker) handleKeys(data string) (done bool) {
 				return true
 			}
 		case "/":
+			p.searchStart = p.query
+			p.searchIndex = p.selectedIndex
 			p.isSearching = true
 			p.query = ""
 			p.selectedIndex = 0
+			p.confirmStopID = ""
+			p.confirmLabel = ""
+			p.notice = ""
 			p.render()
 		case "a":
+			p.confirmStopID = ""
+			p.confirmLabel = ""
 			p.openCreatePopup()
+		case "n":
+			p.selectNextWaiting()
 		case "s":
 			p.cycleAgent()
 		case "\x18": // ^x
 			p.killSelected()
-			if len(p.sessions) == 0 {
-				return true
+		case "\x1b": // esc
+			if p.confirmStopID != "" {
+				p.confirmStopID = ""
+				p.confirmLabel = ""
+				p.render()
+				continue
 			}
-		case "\x03", "\x1b", "q": // ^c, esc, q
+			if p.query != "" {
+				p.query = ""
+				p.selectedIndex = 0
+				p.notice = ""
+				if list := p.filtered(); len(list) > 0 {
+					p.updatePreview(list[0])
+				}
+				p.render()
+				continue
+			}
+			_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
+			return true
+		case "\x03", "q": // ^c, q
 			_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
 			return true
 		}
@@ -601,7 +773,16 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 	}
 	code := key[0]
 	switch {
-	case code == 27 || code == 13: // esc or enter
+	case code == 27: // esc: cancel this search and restore its previous filter
+		p.query = p.searchStart
+		p.isSearching = false
+		p.selectedIndex = p.searchIndex
+		if list := p.filtered(); len(list) > 0 {
+			p.selectedIndex = min(p.selectedIndex, len(list)-1)
+			p.updatePreview(list[p.selectedIndex])
+		}
+		p.render()
+	case code == 13: // enter: keep the current filter
 		p.isSearching = false
 		p.render()
 	case code == 127 || code == 8: // backspace
@@ -671,33 +852,63 @@ func binaryPath() string {
 
 func readInput(out chan<- string) {
 	reader := bufio.NewReader(os.Stdin)
-	for {
-		b, err := reader.ReadByte()
-		if err != nil {
-			return
+	bytes := make(chan byte, 64)
+	go func() {
+		defer close(bytes)
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				return
+			}
+			bytes <- b
+		}
+	}()
+
+	for b := range bytes {
+		if b != '\x1b' {
+			out <- string(b)
+			continue
 		}
 
+		// A terminal sends Escape both as a standalone key and as the prefix
+		// for CSI sequences. File deadlines are not reliable for tmux PTYs, so
+		// use a byte channel and a short timer to distinguish the two without
+		// ever blocking a standalone Escape indefinitely.
 		var buf strings.Builder
 		buf.WriteByte(b)
-
-		// If this looks like the start of an escape sequence, try to read the rest.
-		if b == '\x1b' {
-			_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-			for {
-				next, err := reader.ReadByte()
-				_ = os.Stdin.SetReadDeadline(time.Time{})
-				if err != nil {
-					break
+		timer := time.NewTimer(20 * time.Millisecond)
+	escapeSequence:
+		for {
+			select {
+			case next, ok := <-bytes:
+				if !ok {
+					break escapeSequence
 				}
 				buf.WriteByte(next)
+				if buf.Len() == 2 && next != '[' {
+					break escapeSequence
+				}
 				// CSI sequences end at 0x40-0x7e after params/intermediates.
 				if next >= 0x40 && next <= 0x7e && buf.Len() > 2 {
-					break
+					break escapeSequence
 				}
-				_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(20 * time.Millisecond)
+			case <-timer.C:
+				break escapeSequence
 			}
 		}
-
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 		out <- buf.String()
 	}
 }
