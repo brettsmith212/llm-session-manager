@@ -51,7 +51,7 @@ func main() {
 		if len(args) > 2 {
 			origin = args[2]
 		}
-		if err := add.Add(cwd, origin); err != nil {
+		if _, err := add.Add(cwd, origin, true); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

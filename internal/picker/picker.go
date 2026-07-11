@@ -19,7 +19,10 @@ import (
 	"llm-session-manager/internal/types"
 )
 
-const windowName = "llm-picker"
+const (
+	windowName            = "llm-picker"
+	pickerSelectionOption = "@llm_picker_selection"
+)
 
 // Run starts the ANSI session picker.
 func Run() error {
@@ -35,6 +38,7 @@ func Run() error {
 		selectedIndex: 0,
 		isSearching:   false,
 		pickerActive:  true,
+		popupClosed:   make(chan struct{}, 1),
 	}
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -77,14 +81,20 @@ func Run() error {
 			next := sessions.GetAllSessions(prefix)
 			hadSessions := len(p.sessions) > 0
 			p.sessions = next
+			selectedCreated := p.selectCreatedSession()
 			snap := p.snapshot()
-			if snap != lastSnapshot {
+			if snap != lastSnapshot || selectedCreated {
 				lastSnapshot = snap
 				p.render()
 			}
-			if !hadSessions && len(next) > 0 && p.selectedIndex < len(next) {
+			if !selectedCreated && !hadSessions && len(next) > 0 && p.selectedIndex < len(next) {
 				p.updatePreview(next[p.selectedIndex])
 			}
+		case <-p.popupClosed:
+			p.sessions = sessions.GetAllSessions(prefix)
+			p.selectCreatedSession()
+			lastSnapshot = p.snapshot()
+			p.render()
 		case <-resize:
 			p.render()
 		case active := <-activeChange:
@@ -109,6 +119,7 @@ type picker struct {
 	isSearching   bool
 	pickerActive  bool   // true when left pane (.0) is the active tmux pane
 	activateErr   string // set when activateSession fails to reach the origin window
+	popupClosed   chan struct{}
 }
 
 func (p *picker) filtered() []types.Session {
@@ -424,6 +435,27 @@ func (p *picker) changeSelection(delta int) {
 	p.render()
 }
 
+// selectCreatedSession consumes the window ID left by the create prompt and
+// moves the picker and live preview to that exact new session.
+func (p *picker) selectCreatedSession() bool {
+	windowID := tmux.GetWindowOption(windowName, pickerSelectionOption)
+	if windowID == "" {
+		return false
+	}
+	for i, session := range p.sessions {
+		if session.WindowID != windowID {
+			continue
+		}
+		p.query = ""
+		p.selectedIndex = i
+		p.activateErr = ""
+		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
+		p.updatePreview(session)
+		return true
+	}
+	return false
+}
+
 // activateSession attempts to switch to the session's origin window and pop
 // it up. It returns true only once the picker window has actually been
 // handed off (killed) — false means the picker should stay open so the user
@@ -615,7 +647,16 @@ func (p *picker) openCreatePopup() {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	go func() {
+		_ = cmd.Wait()
+		select {
+		case p.popupClosed <- struct{}{}:
+		default:
+		}
+	}()
 }
 
 func binaryPath() string {

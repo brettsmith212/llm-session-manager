@@ -8,16 +8,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
 
+	"llm-session-manager/internal/add"
 	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/tmux"
 )
 
-const pickerWindow = "llm-picker"
+const (
+	pickerWindow          = "llm-picker"
+	pickerSelectionOption = "@llm_picker_selection"
+)
 
 // Run displays a full-width path input prompt inside a tmux popup.
 func Run(defaultPath, origin string) error {
@@ -141,7 +144,10 @@ func handleKey(keys string, path *string, cursor *int, errMsg *string, origin st
 			*errMsg = err.Error()
 			return false
 		}
-		submit(abs, origin)
+		if err := submit(abs, origin); err != nil {
+			*errMsg = err.Error()
+			return false
+		}
 		return true
 	case code == 21: // ctrl-u: clear entire line
 		*path = ""
@@ -310,24 +316,16 @@ func commonPrefix(a, b string) string {
 	return a[:i]
 }
 
-func submit(path, origin string) {
-	cmd := exec.Command(binaryPath(), "add", path, origin)
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	_ = cmd.Start()
-	_ = tmux.RunRaw([]string{"kill-window", "-t", pickerWindow})
-}
-
-func binaryPath() string {
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		return exe
+func submit(path, origin string) error {
+	windowID, err := add.Add(path, origin, false)
+	if err != nil {
+		return err
 	}
-	if path, err := exec.LookPath("llmux"); err == nil {
-		return path
-	}
-	return os.Args[0]
+	// The picker consumes this after the prompt closes so it can highlight
+	// and preview the exact window just created. This is best-effort because
+	// `llmux prompt` can also be run manually without an open picker.
+	_ = tmux.SetWindowOption(pickerWindow, pickerSelectionOption, windowID)
+	return nil
 }
 
 func readKey(reader *bufio.Reader) (string, error) {
