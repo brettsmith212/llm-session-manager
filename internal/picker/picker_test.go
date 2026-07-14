@@ -25,6 +25,7 @@ func TestFilteredMatchesSessionMeaning(t *testing.T) {
 			State:       types.Working,
 			StateAt:     now,
 			Path:        "/work/API-Service",
+			Label:       "Implement OAuth callback",
 		},
 		{
 			Name:        "llm-web",
@@ -44,6 +45,8 @@ func TestFilteredMatchesSessionMeaning(t *testing.T) {
 			StateAt:     now - 301,
 			Path:        "/work/legacy",
 		},
+	}, gitByPath: map[string]gitInfo{
+		gitPathKey("/work/API-Service"): {valid: true, branch: "feat/oauth"},
 	}}
 
 	tests := []struct {
@@ -51,9 +54,11 @@ func TestFilteredMatchesSessionMeaning(t *testing.T) {
 		query   string
 		wantIDs []string
 	}{
-		{name: "empty returns every session", wantIDs: []string{"@1", "@2", "@3"}},
+		{name: "empty is attention ordered", wantIDs: []string{"@2", "@1", "@3"}},
 		{name: "path is case insensitive", query: "api-service", wantIDs: []string{"@1"}},
 		{name: "agent and state terms combine", query: "claude working", wantIDs: []string{"@1"}},
+		{name: "task label is searchable", query: "oauth callback", wantIDs: []string{"@1"}},
+		{name: "git branch is searchable", query: "feat/oauth", wantIDs: []string{"@1"}},
 		{name: "human attention label is searchable", query: "needs you", wantIDs: []string{"@2"}},
 		{name: "window number is searchable", query: "#2", wantIDs: []string{"@1"}},
 		{name: "stale working session is effectively idle", query: "legacy idle", wantIDs: []string{"@3"}},
@@ -75,30 +80,134 @@ func TestFilteredMatchesSessionMeaning(t *testing.T) {
 	}
 }
 
-func TestVisibleRangeKeepsSelectionWithinAvailableRows(t *testing.T) {
+func TestVisibleListRowsKeepSelectionOnScreen(t *testing.T) {
 	list := []types.Session{
-		{Name: "project-a", WindowID: "@1"},
-		{Name: "project-a", WindowID: "@2"},
-		{Name: "project-b", WindowID: "@3"},
-		{Name: "project-c", WindowID: "@4"},
-		{Name: "project-c", WindowID: "@5"},
+		{Name: "project-a", WindowID: "@1", State: types.Waiting},
+		{Name: "project-a", WindowID: "@2", State: types.Working},
+		{Name: "project-b", WindowID: "@3", State: types.Working},
+		{Name: "project-c", WindowID: "@4", State: types.Idle},
+		{Name: "project-c", WindowID: "@5", State: types.Idle},
 	}
+	p := &picker{sessions: list}
+	ordered := p.filtered()
+	allRows := p.buildListRows(ordered)
 
-	for selected := range list {
-		for rows := 2; rows <= 7; rows++ {
-			start, end := visibleRange(list, selected, rows)
-			if !(start <= selected && selected < end) {
-				t.Fatalf("selection %d not in visible range [%d:%d] with %d rows", selected, start, end, rows)
+	for selected := range ordered {
+		for available := 1; available <= 7; available++ {
+			visible := visibleListRows(allRows, selected, available)
+			if len(visible) > available {
+				t.Fatalf("visible list uses %d rows, only %d available", len(visible), available)
 			}
-			if used := renderedListRows(list[start:end]); used > rows {
-				t.Fatalf("visible range [%d:%d] uses %d rows, only %d available", start, end, used, rows)
+			found := false
+			for _, row := range visible {
+				if row.kind == listRowSession && row.sessionIndex == selected {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("selection %d not visible with %d rows: %#v", selected, available, visible)
 			}
 		}
 	}
+}
 
-	start, end := visibleRange(list, 3, 1)
-	if start != 3 || end != 4 {
-		t.Fatalf("one-row viewport = [%d:%d], want selected item [3:4]", start, end)
+func TestListRowsGroupByAttentionAndWarnAboutSharedWorktrees(t *testing.T) {
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "shared", WindowID: "@1", Path: "/work/shared", State: types.Waiting},
+			{Name: "shared", WindowID: "@2", Path: "/work/shared", State: types.Working},
+			{Name: "idle", WindowID: "@3", Path: "/work/idle", State: types.Idle},
+		},
+		gitByPath: map[string]gitInfo{
+			gitPathKey("/work/shared"): {valid: true, branch: "main", changed: 2, additions: 4, deletions: 1},
+		},
+	}
+	rows := p.buildListRows(p.filtered())
+	var text []string
+	warnings := 0
+	for _, row := range rows {
+		text = append(text, row.text)
+		if row.kind == listRowWarning {
+			warnings++
+		}
+	}
+	joined := strings.Join(text, "|")
+	for _, want := range []string{"NEEDS YOU · 1", "ACTIVE · 1", "IDLE · 1", "main · 2 files · +4 · -1"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("grouped rows %q do not contain %q", joined, want)
+		}
+	}
+	if warnings != 2 {
+		t.Fatalf("shared-worktree warnings = %d, want one in each state section", warnings)
+	}
+}
+
+func TestReplaceSessionsPreservesSelectedWindowAcrossStateReordering(t *testing.T) {
+	p := &picker{sessions: []types.Session{
+		{Name: "a", WindowID: "@1", Path: "/work/a", State: types.Working},
+		{Name: "b", WindowID: "@2", Path: "/work/b", State: types.Waiting},
+	}}
+	// Attention ordering starts with @2, so index 1 selects @1.
+	p.selectedIndex = 1
+	p.replaceSessions([]types.Session{
+		{Name: "a", WindowID: "@1", Path: "/work/a", State: types.Waiting},
+		{Name: "b", WindowID: "@2", Path: "/work/b", State: types.Idle},
+	})
+	if got := p.selectedWindowID(); got != "@1" {
+		t.Fatalf("selected window after state reorder = %q, want @1", got)
+	}
+}
+
+func TestFrozenDisplayStateDoesNotDriftBetweenRefreshes(t *testing.T) {
+	session := types.Session{
+		State: types.Working, DisplayState: types.Idle,
+		StateAt: time.Now().Unix(),
+	}
+	if got := sessionState(session); got != types.Idle {
+		t.Fatalf("sessionState() = %q, want frozen idle despite recent raw working state", got)
+	}
+}
+
+func TestNextWaitingPreservesFilterWhenNothingNeedsAttention(t *testing.T) {
+	p := &picker{
+		query: "api",
+		sessions: []types.Session{{
+			Name: "api", WindowID: "@1", Path: "/work/api", State: types.Idle,
+		}},
+	}
+	captureStdout(t, p.selectNextWaiting)
+	if p.query != "api" {
+		t.Fatalf("query after n with no waiting sessions = %q, want api", p.query)
+	}
+}
+
+func TestInspectGitReportsBranchDiffAndUntrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q", "-b", "main")
+	mustGit(t, repo, "config", "user.name", "llmux test")
+	mustGit(t, repo, "config", "user.email", "llmux@example.com")
+	tracked := repo + "/tracked.txt"
+	if err := os.WriteFile(tracked, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repo, "add", "tracked.txt")
+	mustGit(t, repo, "commit", "-qm", "initial")
+	if err := os.WriteFile(tracked, []byte("after\nextra\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repo+"/untracked.txt", []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	info := inspectGit(repo)
+	if !info.valid || info.branch != "main" || info.changed != 1 || info.untracked != 1 || info.additions != 2 || info.deletions != 1 {
+		t.Fatalf("inspectGit() = %#v, want main with one changed, one untracked, +2/-1", info)
+	}
+	if got := formatGitInfo(info); got != "main · 1 file · +2 · -1 · ?1" {
+		t.Fatalf("formatGitInfo() = %q", got)
 	}
 }
 
@@ -187,6 +296,67 @@ func TestPickerHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestPopupAndReviewKeepControlRoomAlive(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-picker-popup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	project := t.TempDir()
+	mustTmux(t, "new-session", "-d", "-x", "120", "-y", "30", "-s", "origin", "-n", "project", "-c", project, "sleep 1000")
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+	mustTmux(t, "new-window", "-d", "-t", "origin:", "-n", windowName, "sleep 1000")
+	mustTmux(t, "new-session", "-d", "-x", "120", "-y", "30", "-s", "llm-agent", "-n", "amp", "-c", project, "sleep 1000")
+	windowID := mustTmux(t, "display-message", "-p", "-t", "llm-agent:0", "#{window_id}")
+	mustTmux(t, "set-option", "-t", "llm-agent", "@llm_origin", "origin")
+	mustTmux(t, "new-session", "-d", "-x", "120", "-y", "30", "-s", "terminal", "-n", "display", "env -u TMUX tmux attach-session -t origin")
+
+	client := ""
+	waitFor(t, 2*time.Second, "attached project client", func() bool {
+		clients, _ := runTmux("list-clients", "-F", "#{client_name}|#{session_name}")
+		for _, line := range strings.Split(clients, "\n") {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) == 2 && parts[1] == "origin" {
+				client = parts[0]
+				return true
+			}
+		}
+		return false
+	})
+	mustTmux(t, "set-option", "-g", "@llm_parent", client)
+
+	p := &picker{
+		parent: client,
+		sessions: []types.Session{{
+			Name: "llm-agent", WindowID: windowID, WindowName: "amp",
+			Path: project, Origin: "origin", State: types.Working,
+		}},
+	}
+	p.activateSession()
+	waitFor(t, 2*time.Second, "popup over project", func() bool {
+		return clientWindow(client) == "project" &&
+			strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName) &&
+			strings.Contains(mustTmux(t, "capture-pane", "-p", "-t", "terminal:display.0"), "llm-agent")
+	})
+	mustTmux(t, "display-popup", "-c", client, "-C")
+	waitFor(t, 2*time.Second, "project after popup close", func() bool {
+		return clientWindow(client) == "project"
+	})
+
+	mustTmux(t, "switch-client", "-c", client, "-t", "origin:"+windowName)
+	p.reviewProject()
+	waitFor(t, 2*time.Second, "direct project review", func() bool {
+		return clientWindow(client) == "project" &&
+			strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName)
+	})
+}
+
 func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
@@ -218,7 +388,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "respawn-pane", "-k", "-t", "origin:"+windowName+".0", helperCommand)
 
 	waitFor(t, 5*time.Second, "picker startup", func() bool {
-		return strings.Contains(capturePicker(), "Agents") && previewTitle() == "LIVE AGENT · alpha-project · claude #0 · prefix u returns"
+		return strings.Contains(capturePicker(), "NEEDS YOU") && previewTitle() == "LIVE AGENT · zeta-project · amp #0 · prefix u returns"
 	})
 
 	// Enter moves into the already-live agent without closing the control room.
@@ -242,17 +412,23 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	waitFor(t, 2*time.Second, "committed filter", func() bool {
 		return strings.Contains(capturePicker(), "filter: alpha")
 	})
+	// A stale creation handoff must expire without silently eating the filter.
+	mustTmux(t, "set-option", "-w", "-t", "origin:"+windowName, pickerSelectionOption, "@99999")
+	waitFor(t, 4*time.Second, "stale creation handoff cleanup", func() bool {
+		return strings.Contains(capturePicker(), "filter: alpha") &&
+			mustTmux(t, "show-options", "-wqv", "-t", "origin:"+windowName, pickerSelectionOption) == ""
+	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "n")
 	waitFor(t, 2*time.Second, "global attention navigation", func() bool {
 		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "LIVE AGENT · zeta-project · amp #0 · prefix u returns"
 	})
 
 	// A delayed preview update must not pull focus back from the live pane.
-	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "k")
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "j")
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".1")
 	waitFor(t, 2*time.Second, "focus-preserving preview update", func() bool {
 		active := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_active}")
-		return active == "1" && previewTitle() == "LIVE AGENT · beta-project · opencode #0 · prefix u returns"
+		return active == "1" && previewTitle() == "LIVE AGENT · alpha-project · claude #0 · prefix u returns"
 	})
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".0")
 
@@ -262,8 +438,15 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "set-option", "-w", "-t", "origin:"+windowName, pickerSelectionOption, newWindowID)
 	waitFor(t, 4*time.Second, "new session handoff", func() bool {
 		return tmuxSucceeds("has-session", "-t", "origin") &&
-			strings.Contains(capturePicker(), "3/4") &&
+			strings.Contains(capturePicker(), "4/4") &&
+			strings.Contains(capturePicker(), "task:") &&
 			previewTitle() == "LIVE AGENT · delta-project · codex #0 · prefix u returns"
+	})
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "-l", "Refactor picker")
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "Enter")
+	waitFor(t, 2*time.Second, "task label save", func() bool {
+		return mustTmux(t, "show-options", "-wqv", "-t", newWindowID, "@llm_label") == "Refactor picker" &&
+			previewTitle() == "LIVE AGENT · delta-project · Refactor picker · codex #0 · prefix u returns"
 	})
 
 	// Waiting/working sessions require confirmation, Escape cancels, and the
@@ -291,8 +474,12 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 		return !tmuxSucceeds("has-session", "-t", "llm-zeta")
 	})
 
-	// The selection falls back to the newly-added idle session after zeta is
-	// removed, so one Ctrl-X should stop it without another confirmation.
+	// Find the newly-added idle session by its task label. Idle sessions stop
+	// immediately without the working/waiting confirmation step.
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "/", "Refactor picker", "Enter")
+	waitFor(t, 2*time.Second, "task-label search", func() bool {
+		return strings.Contains(capturePicker(), "filter: Refactor picker")
+	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "C-x")
 	waitFor(t, 2*time.Second, "immediate idle stop", func() bool {
 		return !tmuxSucceeds("has-session", "-t", "llm-delta")
@@ -301,12 +488,13 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 		t.Fatal("idle session unexpectedly required stop confirmation")
 	}
 
-	// The explicit popup action retains the old activation handoff. This
-	// isolated server has no attached parent client, so activation is observable
-	// as the control-room window closing while the managed session remains.
+	// Clear the now-empty filter. Popup/review failures in this detached test
+	// server must leave the persistent Control Room alive rather than destroy it.
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "Escape")
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "o")
-	waitFor(t, 2*time.Second, "popup activation handoff", func() bool {
-		return !strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName)
+	waitFor(t, 2*time.Second, "persistent popup failure", func() bool {
+		return strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName) &&
+			strings.Contains(capturePicker(), "no parent tmux client")
 	})
 }
 
@@ -331,6 +519,17 @@ func capturePicker() string {
 func previewTitle() string {
 	output, _ := runTmux("display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_title}")
 	return output
+}
+
+func clientWindow(client string) string {
+	clients, _ := runTmux("list-clients", "-F", "#{client_name}|#{window_name}")
+	for _, line := range strings.Split(clients, "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) == 2 && parts[0] == client {
+			return parts[1]
+		}
+	}
+	return ""
 }
 
 func waitFor(t *testing.T, timeout time.Duration, description string, condition func() bool) {
@@ -367,6 +566,14 @@ func tmuxSucceeds(args ...string) bool {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func mustGit(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
 }
 
 func captureStdout(t *testing.T, write func()) string {

@@ -22,12 +22,14 @@ func IsState(value string) bool {
 
 // Session describes a single managed tmux window running an LLM agent.
 type Session struct {
-	Name        string // parent tmux session name
-	WindowID    string // tmux window id, e.g. "@1"
-	WindowIndex int    // tmux window index, e.g. 0
-	WindowName  string // tmux window name (the agent binary basename, e.g. opencode)
-	State       State
-	StateAt     int64
-	Path        string
-	Origin      string
+	Name         string // parent tmux session name
+	WindowID     string // tmux window id, e.g. "@1"
+	WindowIndex  int    // tmux window index, e.g. 0
+	WindowName   string // tmux window name (the agent binary basename, e.g. opencode)
+	Label        string // optional human-readable task/purpose
+	State        State
+	DisplayState State // effective state frozen at the latest tmux refresh
+	StateAt      int64
+	Path         string
+	Origin       string
 }

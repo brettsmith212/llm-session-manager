@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ const (
 	windowName            = "llm-picker"
 	pickerSelectionOption = "@llm_picker_selection"
 	previewDelay          = 75 * time.Millisecond
+	gitRefreshInterval    = 4 * time.Second
 )
 
 // Run starts the ANSI session picker.
@@ -42,6 +44,8 @@ func Run() error {
 		selectedIndex: 0,
 		isSearching:   false,
 		popupClosed:   make(chan struct{}, 1),
+		gitUpdated:    make(chan map[string]gitInfo, 1),
+		gitByPath:     make(map[string]gitInfo),
 	}
 	p.previewTimer = time.NewTimer(time.Hour)
 	if !p.previewTimer.Stop() {
@@ -73,6 +77,7 @@ func Run() error {
 	if first := p.filtered(); len(first) > 0 {
 		p.updatePreview(first[0])
 	}
+	p.requestGitRefresh()
 
 	lastSnapshot := p.snapshot()
 
@@ -81,8 +86,7 @@ func Run() error {
 		case <-ticker.C:
 			next := sessions.GetAllSessions(prefix)
 			_ = sessions.PublishWaitingStatus(next)
-			hadSessions := len(p.sessions) > 0
-			p.sessions = next
+			p.replaceSessions(next)
 			selectedCreated := p.selectCreatedSession()
 			snap := p.snapshot()
 			if snap != lastSnapshot || selectedCreated {
@@ -92,13 +96,20 @@ func Run() error {
 					p.cancelPreview()
 				}
 			}
-			if !selectedCreated && !hadSessions && len(next) > 0 && p.selectedIndex < len(next) {
-				p.queuePreview(next[p.selectedIndex])
+			if visible := p.filtered(); !selectedCreated && p.selectedIndex < len(visible) && visible[p.selectedIndex].WindowID != p.previewWindowID {
+				p.queuePreview(visible[p.selectedIndex])
 			}
+			p.requestGitRefresh()
 		case <-p.popupClosed:
-			p.sessions = sessions.GetAllSessions(prefix)
+			p.replaceSessions(sessions.GetAllSessions(prefix))
 			p.selectCreatedSession()
 			lastSnapshot = p.snapshot()
+			p.render()
+			p.requestGitRefresh()
+		case info := <-p.gitUpdated:
+			p.gitByPath = info
+			p.gitRefreshing = false
+			p.lastGitRefresh = time.Now()
 			p.render()
 		case <-resize:
 			p.render()
@@ -122,6 +133,10 @@ type picker struct {
 	searchStart       string
 	searchIndex       int
 	isPasting         bool
+	isEditingLabel    bool
+	editLabelID       string
+	editLabelValue    string
+	editLabelCursor   int
 	activateErr       string // set when activateSession fails to reach the origin window
 	confirmStopID     string
 	confirmLabel      string
@@ -132,18 +147,23 @@ type picker struct {
 	pendingPreview    types.Session
 	hasPendingPreview bool
 	previewWindowID   string
+	gitUpdated        chan map[string]gitInfo
+	gitByPath         map[string]gitInfo
+	gitRefreshing     bool
+	lastGitRefresh    time.Time
 }
 
 func (p *picker) filtered() []types.Session {
 	terms := strings.Fields(strings.ToLower(p.query))
-	if len(terms) == 0 {
-		return p.sessions
-	}
 	out := make([]types.Session, 0, len(p.sessions))
 	for _, s := range p.sessions {
-		_, stateLabel, _ := statePresentation(sessions.EffectiveState(s))
-		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s #%d",
-			s.Path, s.Name, s.WindowName, stateLabel, s.WindowIndex))
+		_, stateLabel, _ := statePresentation(sessionState(s))
+		branch := ""
+		if info, ok := p.gitByPath[gitPathKey(s.Path)]; ok {
+			branch = info.branch
+		}
+		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d",
+			s.Path, s.Name, s.WindowName, s.Label, branch, stateLabel, s.WindowIndex))
 		matches := true
 		for _, term := range terms {
 			if !strings.Contains(haystack, term) {
@@ -155,7 +175,99 @@ func (p *picker) filtered() []types.Session {
 			out = append(out, s)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		leftRank := stateRank(sessionState(out[i]))
+		rightRank := stateRank(sessionState(out[j]))
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		leftPath := strings.ToLower(filepath.Clean(out[i].Path))
+		rightPath := strings.ToLower(filepath.Clean(out[j].Path))
+		if leftPath != rightPath {
+			return leftPath < rightPath
+		}
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].WindowIndex < out[j].WindowIndex
+	})
 	return out
+}
+
+func stateRank(state types.State) int {
+	switch state {
+	case types.Waiting:
+		return 0
+	case types.Idle:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func sessionState(session types.Session) types.State {
+	if types.IsState(string(session.DisplayState)) {
+		return session.DisplayState
+	}
+	return sessions.EffectiveState(session)
+}
+
+func (p *picker) selectedWindowID() string {
+	list := p.filtered()
+	if p.selectedIndex < 0 || p.selectedIndex >= len(list) {
+		return ""
+	}
+	return list[p.selectedIndex].WindowID
+}
+
+func (p *picker) replaceSessions(next []types.Session) {
+	selectedID := p.selectedWindowID()
+	for i := range next {
+		if !types.IsState(string(next[i].DisplayState)) {
+			next[i].DisplayState = sessions.EffectiveState(next[i])
+		}
+	}
+	p.sessions = next
+	list := p.filtered()
+	if selectedID != "" {
+		for i, session := range list {
+			if session.WindowID == selectedID {
+				p.selectedIndex = i
+				return
+			}
+		}
+	}
+	p.selectedIndex = max(0, min(p.selectedIndex, len(list)-1))
+}
+
+func (p *picker) requestGitRefresh() {
+	if p.gitUpdated == nil || p.gitRefreshing || time.Since(p.lastGitRefresh) < gitRefreshInterval {
+		return
+	}
+	seen := make(map[string]bool)
+	paths := make([]string, 0, len(p.sessions))
+	for _, session := range p.sessions {
+		key := gitPathKey(session.Path)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		paths = append(paths, session.Path)
+	}
+	p.gitRefreshing = true
+	go func() {
+		p.gitUpdated <- collectGitInfo(paths)
+	}()
+}
+
+func (p *picker) sharedPathCounts() map[string]int {
+	counts := make(map[string]int)
+	for _, session := range p.sessions {
+		if key := gitPathKey(session.Path); key != "" {
+			counts[key]++
+		}
+	}
+	return counts
 }
 
 // formatBadge renders an agent name as colored text (no brackets, no
@@ -189,7 +301,7 @@ func truncateVisible(str, prefix, suffix string, maxVisible int) string {
 func (p *picker) snapshot() string {
 	parts := make([]string, len(p.sessions))
 	for i, s := range p.sessions {
-		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%d:%s:%s", s.Name, s.WindowID, s.WindowIndex, s.State, s.StateAt, s.Path, s.WindowName)
+		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%s:%d:%s:%s:%s", s.Name, s.WindowID, s.WindowIndex, s.State, sessionState(s), s.StateAt, s.Path, s.WindowName, s.Label)
 	}
 	return strings.Join(parts, "|")
 }
@@ -214,7 +326,7 @@ func (p *picker) render() {
 	}
 	waiting := 0
 	for _, session := range p.sessions {
-		if sessions.EffectiveState(session) == types.Waiting {
+		if sessionState(session) == types.Waiting {
 			waiting++
 		}
 	}
@@ -236,7 +348,15 @@ func (p *picker) render() {
 	}
 	frame.lineBg(1, header, ansi.Surface0)
 
-	if p.isSearching {
+	if p.isEditingLabel {
+		before := p.editLabelValue[:p.editLabelCursor]
+		after := p.editLabelValue[p.editLabelCursor:]
+		frame.line(2, fmt.Sprintf("  %stask:%s %s%s%s_%s%s  %senter save · esc cancel · ^u clear%s",
+			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+			ansi.Foreground(ansi.Text), before, ansi.Foreground(ansi.Blue),
+			ansi.Foreground(ansi.Text), after,
+			ansi.Foreground(ansi.Overlay0), ansi.Reset))
+	} else if p.isSearching {
 		frame.line(2, fmt.Sprintf("  %s/%s%s%s%s_%s  %sesc cancel · enter keep%s",
 			ansi.Foreground(ansi.Overlay0), ansi.Reset,
 			ansi.Foreground(ansi.Text), p.query,
@@ -248,7 +368,8 @@ func (p *picker) render() {
 			ansi.Foreground(ansi.Text), p.query, ansi.Reset,
 			ansi.Foreground(ansi.Overlay0), ansi.Reset))
 	} else {
-		frame.line(2, fmt.Sprintf("  %s↑↓%s %snav · %s⏎%s %slive · %so/⇧⏎%s %spopup · %s/%s %sfind%s",
+		frame.line(2, fmt.Sprintf("  %s↑↓%s %snav · %s⏎%s %slive · %so%s %spopup · %sr%s %sreview · %s/%s %sfind%s",
+			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
@@ -279,9 +400,9 @@ func (p *picker) render() {
 
 	footerRow := rows
 	if rows >= 6 {
-		footer := "  a add · n needs you · s agent · ^x stop · q close"
+		footer := "  a add · e label · n needs you · s agent · ^x stop · q close"
 		if cols < 60 {
-			footer = "  a add · n next · s agent · ^x stop · q"
+			footer = "  a add · e label · n next · ^x stop · q"
 		}
 		frame.line(footerRow, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Overlay0), footer, ansi.Reset))
 	} else {
@@ -289,8 +410,9 @@ func (p *picker) render() {
 	}
 
 	availableRows := max(0, footerRow-row)
-	startIndex, endIndex := visibleRange(list, p.selectedIndex, availableRows)
-	if startIndex == endIndex {
+	listRows := p.buildListRows(list)
+	visibleRows := visibleListRows(listRows, p.selectedIndex, availableRows)
+	if len(visibleRows) == 0 {
 		if len(list) == 0 {
 			if p.query != "" {
 				frame.line(row, fmt.Sprintf("  %sno matches · %sesc%s clears the filter%s",
@@ -304,92 +426,171 @@ func (p *picker) render() {
 		return
 	}
 
-	var prevSession string
-	for index := startIndex; index < endIndex && row < footerRow; index++ {
-		session := list[index]
-		if availableRows > 1 && session.Name != prevSession {
-			path := sessions.FormatPath(session.Path)
-			if path == "" {
-				path = session.Name
-			}
-			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), path, ansi.Reset))
-			row++
-			prevSession = session.Name
-		}
+	for _, listRow := range visibleRows {
 		if row >= footerRow {
 			break
 		}
-		isLastInGroup := index == len(list)-1 || list[index+1].Name != session.Name
-		row = drawItem(frame, session, cols, index == p.selectedIndex, row, isLastInGroup)
+		switch listRow.kind {
+		case listRowSection:
+			text := "  ── " + listRow.text + " "
+			text += strings.Repeat("─", max(0, cols-utf8.RuneCountInString(text)-2))
+			frame.line(row, fmt.Sprintf("%s%s%s", ansi.Foreground(listRow.color), text, ansi.Reset))
+			row++
+		case listRowProject:
+			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), listRow.text, ansi.Reset))
+			row++
+		case listRowGit:
+			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Overlay0), listRow.text, ansi.Reset))
+			row++
+		case listRowWarning:
+			frame.line(row, fmt.Sprintf("  %s⚠ %s%s", ansi.Foreground(ansi.Yellow), listRow.text, ansi.Reset))
+			row++
+		case listRowSession:
+			row = drawItem(frame, list[listRow.sessionIndex], cols, listRow.sessionIndex == p.selectedIndex, row, listRow.isLast)
+		}
 	}
 	frame.flush()
 }
 
-func visibleRange(list []types.Session, selected, maxRows int) (start, end int) {
-	if len(list) == 0 || maxRows < 1 {
-		return 0, 0
-	}
-	selected = max(0, min(selected, len(list)-1))
-	if maxRows == 1 {
-		return selected, selected + 1
-	}
-	start, end = selected, selected+1
-	for start > 0 && renderedListRows(list[start-1:end]) <= maxRows {
-		start--
-	}
-	for end < len(list) && renderedListRows(list[start:end+1]) <= maxRows {
-		end++
-	}
-	return start, end
+type listRowKind int
+
+const (
+	listRowSection listRowKind = iota
+	listRowProject
+	listRowGit
+	listRowWarning
+	listRowSession
+)
+
+type pickerListRow struct {
+	kind         listRowKind
+	text         string
+	color        ansi.RGB
+	sessionIndex int
+	isLast       bool
 }
 
-func renderedListRows(list []types.Session) int {
-	rows := len(list)
-	previous := ""
+func (p *picker) buildListRows(list []types.Session) []pickerListRow {
+	if len(list) == 0 {
+		return nil
+	}
+	stateCounts := [3]int{}
 	for _, session := range list {
-		if session.Name != previous {
-			rows++
-			previous = session.Name
+		stateCounts[stateRank(sessionState(session))]++
+	}
+	shared := p.sharedPathCounts()
+	rows := make([]pickerListRow, 0, len(list)*2)
+	previousRank := -1
+	previousProject := ""
+	for i, session := range list {
+		rank := stateRank(sessionState(session))
+		if rank != previousRank {
+			name := "ACTIVE"
+			color := ansi.Blue
+			if rank == 0 {
+				name = "NEEDS YOU"
+				color = ansi.Yellow
+			} else if rank == 2 {
+				name = "IDLE"
+				color = ansi.Overlay0
+			}
+			rows = append(rows, pickerListRow{kind: listRowSection, text: fmt.Sprintf("%s · %d", name, stateCounts[rank]), color: color})
+			previousRank = rank
+			previousProject = ""
 		}
+
+		projectKey := gitPathKey(session.Path)
+		if projectKey == "" {
+			projectKey = session.Name
+		}
+		if projectKey != previousProject {
+			path := sessions.FormatPath(session.Path)
+			if path == "" {
+				path = session.Name
+			}
+			rows = append(rows, pickerListRow{kind: listRowProject, text: path})
+			if git := formatGitInfo(p.gitByPath[projectKey]); git != "" {
+				rows = append(rows, pickerListRow{kind: listRowGit, text: git})
+			}
+			if count := shared[projectKey]; count > 1 {
+				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents share this worktree", count)})
+			}
+			previousProject = projectKey
+		}
+
+		nextSameProject := false
+		if i+1 < len(list) {
+			next := list[i+1]
+			nextKey := gitPathKey(next.Path)
+			if nextKey == "" {
+				nextKey = next.Name
+			}
+			nextSameProject = stateRank(sessionState(next)) == rank && nextKey == projectKey
+		}
+		rows = append(rows, pickerListRow{kind: listRowSession, sessionIndex: i, isLast: !nextSameProject})
 	}
 	return rows
 }
 
+func visibleListRows(rows []pickerListRow, selected, maxRows int) []pickerListRow {
+	if len(rows) == 0 || maxRows < 1 {
+		return nil
+	}
+	selectedRow := 0
+	for i, row := range rows {
+		if row.kind == listRowSession && row.sessionIndex == selected {
+			selectedRow = i
+			break
+		}
+	}
+	start := max(0, selectedRow-maxRows/2)
+	end := min(len(rows), start+maxRows)
+	start = max(0, end-maxRows)
+	return rows[start:end]
+}
+
 func drawItem(frame *screenFrame, session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
-	state := sessions.EffectiveState(session)
+	state := sessionState(session)
 	stateSymbol, stateLabel, stateColor := statePresentation(state)
 	ago := sessions.FormatAgo(session.StateAt)
 	agentName := session.WindowName
 	if agentName == "" {
 		agentName = "?"
 	}
-	suffixStr := fmt.Sprintf(" #%d", session.WindowIndex)
+	windowNumber := fmt.Sprintf(" #%d", session.WindowIndex)
 
 	connector := "├─"
 	if isLastInGroup {
 		connector = "└─"
 	}
+	if selected {
+		connector = "▸ "
+	}
 
 	statePadded := fmt.Sprintf("%-9s", stateLabel)
-	baseWidth := 16 // indent + connector + symbol + padded state
-	available := max(0, cols-baseWidth-utf8.RuneCountInString(suffixStr))
-	detailPrefix := ""
-	if available >= utf8.RuneCountInString(ago)+7 {
-		detailPrefix = "  " + ago + "  "
-	} else if available >= 4 {
-		detailPrefix = "  "
-	} else if available >= 2 {
-		detailPrefix = " "
-	}
-	agentWidth := max(0, available-utf8.RuneCountInString(detailPrefix))
+	const prefixWidth = 17 // indent + connector + symbol + padded state + separator
+	agentWidth := min(16, max(0, cols-prefixWidth-utf8.RuneCountInString(windowNumber)-2))
 	agentName = truncateVisible(agentName, "", "", agentWidth)
-	if agentName == "" {
-		detailPrefix = ""
-	}
-
 	badge := ""
 	if agentName != "" {
 		badge = formatBadge(agentName, agent.BadgeColor(session.WindowName))
+	}
+	suffixWidth := utf8.RuneCountInString(agentName) + utf8.RuneCountInString(windowNumber)
+	if agentName != "" {
+		suffixWidth += 2
+	}
+	detailWidth := max(0, cols-prefixWidth-suffixWidth)
+	detail := strings.TrimSpace(session.Label)
+	if detail == "" {
+		detail = ago
+	} else if detailWidth >= utf8.RuneCountInString(detail)+utf8.RuneCountInString(ago)+3 {
+		detail += "  " + ago
+	}
+	detail = truncateVisible(detail, "", "", detailWidth)
+	padding := strings.Repeat(" ", max(0, detailWidth-utf8.RuneCountInString(detail)))
+	separator := ""
+	if agentName != "" {
+		separator = "  "
 	}
 
 	if selected {
@@ -400,9 +601,9 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 
 		line1 := "  " +
 			accent + connector + " " +
-			dot + stateSymbol + " " + txt + statePadded +
-			muted + detailPrefix +
-			badge + ansi.Background(ansi.Surface0) + muted + suffixStr
+			dot + stateSymbol + " " + txt + statePadded + " " +
+			txt + detail + muted + padding + separator +
+			badge + ansi.Background(ansi.Surface0) + muted + windowNumber
 
 		frame.lineBg(row, line1, ansi.Surface0)
 	} else {
@@ -413,9 +614,9 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 
 		line1 := "  " +
 			tree + connector + ansi.Reset + " " +
-			dot + stateSymbol + " " + txt + statePadded + ansi.Reset +
-			muted + detailPrefix + ansi.Reset +
-			badge + muted + suffixStr + ansi.Reset
+			dot + stateSymbol + " " + txt + statePadded + " " + ansi.Reset +
+			txt + detail + muted + padding + separator + ansi.Reset +
+			badge + muted + windowNumber + ansi.Reset
 
 		frame.line(row, line1)
 	}
@@ -604,12 +805,21 @@ func (p *picker) updatePreview(session types.Session) {
 	if !updated {
 		return
 	}
+	p.setPreviewTitle(session)
+	p.previewWindowID = session.WindowID
+}
+
+func (p *picker) setPreviewTitle(session types.Session) {
 	// Refresh the live pane title with the name + window index so its border
 	// always tracks what is shown there and advertises the outer-tmux escape.
+	title := fmt.Sprintf("LIVE AGENT · %s", projectName(session))
+	if session.Label != "" {
+		title += " · " + session.Label
+	}
+	title += fmt.Sprintf(" · %s #%d · prefix u returns", session.WindowName, session.WindowIndex)
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
-		fmt.Sprintf("LIVE AGENT · %s · %s #%d · prefix u returns", projectName(session), session.WindowName, session.WindowIndex),
+		title,
 		"-t", ":" + windowName + ".1"})
-	p.previewWindowID = session.WindowID
 }
 
 func (p *picker) focusPreview() {
@@ -643,16 +853,24 @@ func (p *picker) selectNextWaiting() {
 		currentID = filtered[p.selectedIndex].WindowID
 	}
 
-	// Attention navigation is intentionally global. A committed project or
-	// agent filter should never hide a session that needs the user.
-	p.query = ""
-	list := p.sessions
-	if len(list) == 0 {
+	hasWaiting := false
+	for _, session := range p.sessions {
+		if sessionState(session) == types.Waiting {
+			hasWaiting = true
+			break
+		}
+	}
+	if !hasWaiting {
 		p.notice = "no sessions need attention"
 		p.noticeError = false
 		p.render()
 		return
 	}
+
+	// Attention navigation is intentionally global. A committed project or
+	// agent filter should never hide a session that needs the user.
+	p.query = ""
+	list := p.filtered()
 	start := -1
 	for i, session := range list {
 		if session.WindowID == currentID {
@@ -663,7 +881,7 @@ func (p *picker) selectNextWaiting() {
 	p.selectedIndex = max(0, start)
 	for offset := 1; offset <= len(list); offset++ {
 		index := (start + offset) % len(list)
-		if sessions.EffectiveState(list[index]) != types.Waiting {
+		if sessionState(list[index]) != types.Waiting {
 			continue
 		}
 		p.selectedIndex = index
@@ -692,6 +910,9 @@ func sessionLabel(session types.Session) string {
 	if agentName == "" {
 		agentName = "agent"
 	}
+	if session.Label != "" {
+		return fmt.Sprintf("%s · %s · %s #%d", projectName(session), session.Label, agentName, session.WindowIndex)
+	}
 	return fmt.Sprintf("%s · %s #%d", projectName(session), agentName, session.WindowIndex)
 }
 
@@ -702,11 +923,27 @@ func (p *picker) selectCreatedSession() bool {
 	if windowID == "" {
 		return false
 	}
-	for i, session := range p.sessions {
-		if session.WindowID != windowID {
+	var created types.Session
+	found := false
+	for _, session := range p.sessions {
+		if session.WindowID == windowID {
+			created = session
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Add sets this option only after marking the new window as managed, so
+		// a missing window is stale (for example, the agent exited immediately).
+		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
+		return false
+	}
+
+	p.query = ""
+	for i, session := range p.filtered() {
+		if session.WindowID != created.WindowID {
 			continue
 		}
-		p.query = ""
 		p.selectedIndex = i
 		p.activateErr = ""
 		p.confirmStopID = ""
@@ -714,26 +951,13 @@ func (p *picker) selectCreatedSession() bool {
 		p.notice = ""
 		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
 		p.queuePreview(session)
+		p.beginLabelEdit(session)
 		return true
 	}
 	return false
 }
 
-// activateSession attempts to switch to the session's origin window and pop
-// it up. It returns true only once the picker window has actually been
-// handed off (killed) — false means the picker should stay open so the user
-// can see the error and retry rather than being left in a dead pane.
-func (p *picker) activateSession() bool {
-	list := p.filtered()
-	if p.selectedIndex >= len(list) {
-		return false
-	}
-	session := list[p.selectedIndex]
-
-	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
-	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
-	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
-
+func (p *picker) sessionOrigin(session types.Session) string {
 	origin := session.Origin
 	if origin == "" {
 		origin = tmux.GetSessionOption(session.Name, "@llm_origin")
@@ -741,33 +965,85 @@ func (p *picker) activateSession() bool {
 	if origin == "" {
 		origin = tmux.GetParentSession()
 	}
-	if origin != "" && origin != session.Name {
-		if err := tmux.EnsureOriginWindow(origin, session.Path, parent); err != nil {
-			// Don't fall through to opening the popup / killing the picker
-			// window on a half-completed switch — that's what leaves the
-			// popup stacked on whatever window the client happened to be on
-			// before. Surface the failure and let the user retry instead.
-			p.activateErr = err.Error()
-			p.render()
-			return false
+	return origin
+}
+
+func (p *picker) switchToProject(session types.Session) bool {
+	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
+	if parent == "" {
+		p.activateErr = "no parent tmux client is available"
+		p.render()
+		return false
+	}
+	if session.Path == "" {
+		p.activateErr = "no project path is available"
+		p.render()
+		return false
+	}
+	origin := p.sessionOrigin(session)
+	if origin == "" || origin == session.Name {
+		p.activateErr = "no project origin is available"
+		p.render()
+		return false
+	}
+	if strings.HasPrefix(origin, "@") {
+		if resolved, err := tmux.DisplayMessage("#{session_name}", origin); err == nil {
+			origin = resolved
 		}
 	}
-
-	if parent != "" {
-		attachCmd := tmux.AttachCommand(session.Name, false) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
-		cmd := exec.Command("tmux", "display-popup",
-			"-c", parent,
-			"-w", width,
-			"-h", height,
-			"-E",
-			attachCmd)
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		_ = cmd.Start()
+	if origin == "" || !tmux.HasSession(origin) {
+		p.activateErr = "project origin is no longer available"
+		p.render()
+		return false
 	}
-	_ = tmux.RunRaw([]string{"kill-window", "-t", windowName})
+	if err := tmux.EnsureOriginWindow(origin, session.Path, parent); err != nil {
+		p.activateErr = err.Error()
+		p.render()
+		return false
+	}
+	p.activateErr = ""
 	return true
+}
+
+func (p *picker) reviewProject() {
+	list := p.filtered()
+	if p.selectedIndex >= len(list) {
+		return
+	}
+	p.switchToProject(list[p.selectedIndex])
+}
+
+// activateSession switches the parent client to the selected project's
+// review window and opens the agent over it while the Control Room remains
+// alive in the background.
+func (p *picker) activateSession() {
+	list := p.filtered()
+	if p.selectedIndex >= len(list) {
+		return
+	}
+	session := list[p.selectedIndex]
+	if !p.switchToProject(session) {
+		return
+	}
+	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
+	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
+	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
+	attachCmd := tmux.AttachCommand(session.Name, false) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
+	cmd := exec.Command("tmux", "display-popup",
+		"-c", parent,
+		"-w", width,
+		"-h", height,
+		"-E",
+		attachCmd)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		p.activateErr = "couldn't open popup: " + err.Error()
+		p.render()
+		return
+	}
+	go func() { _ = cmd.Wait() }()
 }
 
 func (p *picker) killSelected() {
@@ -778,7 +1054,7 @@ func (p *picker) killSelected() {
 	session := list[p.selectedIndex]
 	label := sessionLabel(session)
 
-	if sessions.EffectiveState(session) != types.Idle && p.confirmStopID != session.WindowID {
+	if sessionState(session) != types.Idle && p.confirmStopID != session.WindowID {
 		p.confirmStopID = session.WindowID
 		p.confirmLabel = label
 		p.notice = ""
@@ -811,7 +1087,7 @@ func (p *picker) killSelected() {
 		_ = tmux.KillSession(session.Name)
 	}
 
-	p.sessions = sessions.GetAllSessions(p.prefix)
+	p.replaceSessions(sessions.GetAllSessions(p.prefix))
 	_ = sessions.PublishWaitingStatus(p.sessions)
 	p.notice = "stopped " + label
 	p.noticeError = false
@@ -821,6 +1097,133 @@ func (p *picker) killSelected() {
 		p.selectedIndex = max(0, len(next)-1)
 	}
 	p.renderSelection()
+}
+
+func (p *picker) beginLabelEdit(session types.Session) {
+	p.isEditingLabel = true
+	p.editLabelID = session.WindowID
+	p.editLabelValue = session.Label
+	p.editLabelCursor = len(session.Label)
+	p.activateErr = ""
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+	p.notice = ""
+}
+
+func (p *picker) editSelectedLabel() {
+	list := p.filtered()
+	if p.selectedIndex >= len(list) {
+		return
+	}
+	p.beginLabelEdit(list[p.selectedIndex])
+	p.render()
+}
+
+func (p *picker) cancelLabelEdit() {
+	p.isEditingLabel = false
+	p.editLabelID = ""
+	p.editLabelValue = ""
+	p.editLabelCursor = 0
+	p.render()
+}
+
+func (p *picker) saveLabelEdit() {
+	label := strings.TrimSpace(p.editLabelValue)
+	if err := tmux.SetWindowOption(p.editLabelID, "@llm_label", label); err != nil {
+		p.notice = "couldn't save task label: " + err.Error()
+		p.noticeError = true
+		p.render()
+		return
+	}
+	selectedID := p.editLabelID
+	var updated types.Session
+	for i := range p.sessions {
+		if p.sessions[i].WindowID == selectedID {
+			p.sessions[i].Label = label
+			updated = p.sessions[i]
+			break
+		}
+	}
+	p.isEditingLabel = false
+	p.editLabelID = ""
+	p.editLabelValue = ""
+	p.editLabelCursor = 0
+	p.notice = "task label updated"
+	if label == "" {
+		p.notice = "task label cleared"
+	}
+	p.noticeError = false
+
+	list := p.filtered()
+	selected := false
+	for i, session := range list {
+		if session.WindowID == selectedID {
+			p.selectedIndex = i
+			selected = true
+			break
+		}
+	}
+	if !selected {
+		p.query = ""
+		for i, session := range p.filtered() {
+			if session.WindowID == selectedID {
+				p.selectedIndex = i
+				break
+			}
+		}
+	}
+	if updated.WindowID != "" && p.previewWindowID == updated.WindowID {
+		p.setPreviewTitle(updated)
+	}
+	p.renderSelection()
+}
+
+func (p *picker) handleLabelKey(key string) {
+	if len(key) == 0 {
+		return
+	}
+	code := key[0]
+	switch {
+	case key == "\x1b":
+		p.cancelLabelEdit()
+		return
+	case code == 13:
+		p.saveLabelEdit()
+		return
+	case code == 21: // ctrl-u
+		p.editLabelValue = ""
+		p.editLabelCursor = 0
+	case code == 127 || code == 8:
+		if p.editLabelCursor > 0 {
+			_, size := utf8.DecodeLastRuneInString(p.editLabelValue[:p.editLabelCursor])
+			start := p.editLabelCursor - size
+			p.editLabelValue = p.editLabelValue[:start] + p.editLabelValue[p.editLabelCursor:]
+			p.editLabelCursor = start
+		}
+	case key == "\x1b[3~":
+		if p.editLabelCursor < len(p.editLabelValue) {
+			_, size := utf8.DecodeRuneInString(p.editLabelValue[p.editLabelCursor:])
+			p.editLabelValue = p.editLabelValue[:p.editLabelCursor] + p.editLabelValue[p.editLabelCursor+size:]
+		}
+	case key == "\x1b[D":
+		if p.editLabelCursor > 0 {
+			_, size := utf8.DecodeLastRuneInString(p.editLabelValue[:p.editLabelCursor])
+			p.editLabelCursor -= size
+		}
+	case key == "\x1b[C":
+		if p.editLabelCursor < len(p.editLabelValue) {
+			_, size := utf8.DecodeRuneInString(p.editLabelValue[p.editLabelCursor:])
+			p.editLabelCursor += size
+		}
+	case key == "\x1b[H" || key == "\x1b[1~":
+		p.editLabelCursor = 0
+	case key == "\x1b[F" || key == "\x1b[4~":
+		p.editLabelCursor = len(p.editLabelValue)
+	case code >= 32 && code <= 126 && len(p.editLabelValue) < 120:
+		p.editLabelValue = p.editLabelValue[:p.editLabelCursor] + key + p.editLabelValue[p.editLabelCursor:]
+		p.editLabelCursor += len(key)
+	}
+	p.render()
 }
 
 // cycleAgent rotates the global @llm_active_agent to the next entry in
@@ -846,7 +1249,11 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.isPasting = false
 			continue
 		}
-		if p.isPasting && !p.isSearching {
+		if p.isPasting && !p.isSearching && !p.isEditingLabel {
+			continue
+		}
+		if p.isEditingLabel {
+			p.handleLabelKey(key)
 			continue
 		}
 		if p.isSearching {
@@ -865,9 +1272,9 @@ func (p *picker) handleKeys(data string) (done bool) {
 		case "\r":
 			p.focusPreview()
 		case "o", "\x1b[13;2u", "\x1b[27;2;13~":
-			if p.activateSession() {
-				return true
-			}
+			p.activateSession()
+		case "r":
+			p.reviewProject()
 		case "/":
 			p.searchStart = p.query
 			p.searchIndex = p.selectedIndex
@@ -882,6 +1289,8 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.confirmStopID = ""
 			p.confirmLabel = ""
 			p.openCreatePopup()
+		case "e":
+			p.editSelectedLabel()
 		case "n":
 			p.selectNextWaiting()
 		case "s":

@@ -113,13 +113,31 @@ the right pane is the selected agent's live terminal:
 
 - `Enter` moves into the live agent without closing the control room.
 - `Ctrl+a u` returns from the live agent to the session list.
-- `o` opens the selected agent in the full popup over its project window.
+- `o` opens the selected agent in the full popup over its project window while
+  keeping the control room alive in the background.
 - `Shift+Enter` also opens the popup when the terminal and tmux modified-key
   configuration distinguish it from Enter; `o` is the portable binding.
-- `a` creates another session and returns to the control room with it selected.
+- `r` goes directly to the selected project window for Neovim/diff review.
+- `a` creates another session, returns with it selected, and offers an optional
+  task label.
+- `e` edits the selected session's task label. Labels are stored in the tmux
+  window's `@llm_label` option; internal hash-based session names do not change.
+- `n` jumps to the next agent that needs attention, even when a filter hides it.
+- `/` searches paths, task labels, branches, agents, and states.
+- `Ctrl+x` stops the selected agent. Working and waiting agents require a
+  second `Ctrl+x` confirmation; idle agents stop immediately.
+
+Sessions are grouped into **Needs You**, **Active**, and **Idle** sections, then
+by project. Git repositories show their local branch and compact working-tree
+summary (`main · 3 files · +24 · -6 · ?1`). Clean repositories show
+`main · clean`; non-Git or unavailable directories omit that line. Git reads
+are local, cached, and never fetch from a remote. Projects with multiple agents
+in the same working directory show a shared-worktree warning.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.
+`Ctrl+a u` then reopens the same persistent control room rather than rebuilding
+it.
 
 ### Switching agents
 

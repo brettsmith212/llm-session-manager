@@ -60,9 +60,9 @@ func render(path string, cursor int, errMsg string) {
 
 	fmt.Print(ansi.ClearScreen)
 
-	const title = "  Create new session"
+	const title = "  Create new agent"
 	const label = "  Create in: "
-	const help = "  Enter to create  ·  Ctrl-C to cancel  ·  Ctrl-U clear  ·  Ctrl-T fzf"
+	const help = "  Enter to create  ·  task label follows  ·  Ctrl-C cancel  ·  Ctrl-T fzf"
 
 	writeLine(2, cols, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Blue)+ansi.Bold, title, ansi.Reset))
 
