@@ -56,5 +56,9 @@ func SetState(state types.State) error {
 	if err := tmux.SetWindowOption(windowID, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix())); err != nil {
 		return err
 	}
+
+	// Keep status-bar options synchronized with every lifecycle transition.
+	// Recounting all managed windows also self-heals if an earlier hook was
+	// interrupted after updating its window but before publishing the count.
 	return sessions.PublishWaitingStatus(sessions.GetAllSessions(prefix))
 }

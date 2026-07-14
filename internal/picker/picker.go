@@ -33,6 +33,7 @@ func Run() error {
 	parent := tmux.GetGlobalOption("@llm_parent", "")
 
 	sess := sessions.GetAllSessions(prefix)
+	_ = sessions.PublishWaitingStatus(sess)
 	p := &picker{
 		prefix:        prefix,
 		parent:        parent,
@@ -79,6 +80,7 @@ func Run() error {
 		select {
 		case <-ticker.C:
 			next := sessions.GetAllSessions(prefix)
+			_ = sessions.PublishWaitingStatus(next)
 			hadSessions := len(p.sessions) > 0
 			p.sessions = next
 			selectedCreated := p.selectCreatedSession()

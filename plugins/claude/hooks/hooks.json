@@ -8,6 +8,13 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+        ]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [
@@ -25,35 +32,35 @@
     "PermissionRequest": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"] }
         ]
       }
     ],
     "Elicitation": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"] }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
         ]
       }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
         ]
       }
     ],
     "TaskCompleted": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
         ]
       }
     ]

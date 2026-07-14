@@ -94,7 +94,7 @@ func PublishWaitingStatus(all []types.Session) error {
 }
 
 // GetAllSessions fetches all managed agent windows across all managed tmux
-// sessions, grouped and sorted by session then window index.
+// sessions, sorted by project path, session, then window index.
 func GetAllSessions(prefix string) []types.Session {
 	result := tmux.RunRaw([]string{"list-windows", "-a", "-F", windowFormat})
 	if result.ExitCode != 0 || result.Stdout == "" {
