@@ -12,18 +12,22 @@
 
 type State = 'working' | 'waiting' | 'idle'
 
-async function setState($: any, state: State): Promise<void> {
+async function setState($: any, state: State): Promise<boolean> {
   try {
     await $`llmux state ${state}`
+    return true
   } catch {
     // State updates are best-effort and must never interrupt the agent.
+    return false
   }
 }
 
 export const TmuxSessionManager = async ({ $ }: { $: any }) => {
-  const busy = new Set<string>()
+  const active = new Set<string>()
+  const failed = new Set<string>()
   const pending = new Map<string, Set<string>>()
   let lastPublished: State | null = null
+  let publishing = false
 
   function addPending(sessionID: string, id: string): void {
     let requests = pending.get(sessionID)
@@ -42,21 +46,30 @@ export const TmuxSessionManager = async ({ $ }: { $: any }) => {
   }
 
   function forget(sessionID: string): void {
-    busy.delete(sessionID)
+    active.delete(sessionID)
+    failed.delete(sessionID)
     pending.delete(sessionID)
   }
 
   function aggregate(): State {
-    if (pending.size > 0) return 'waiting'
-    if (busy.size > 0) return 'working'
+    if (pending.size > 0 || failed.size > 0) return 'waiting'
+    if (active.size > 0) return 'working'
     return 'idle'
   }
 
   async function publish(): Promise<void> {
-    const next = aggregate()
-    if (next === lastPublished) return
-    await setState($, next)
-    lastPublished = next
+    if (publishing) return
+    publishing = true
+    try {
+      while (true) {
+        const next = aggregate()
+        if (next === lastPublished) return
+        if (!(await setState($, next))) return
+        lastPublished = next
+      }
+    } finally {
+      publishing = false
+    }
   }
 
   await publish()
@@ -69,15 +82,37 @@ export const TmuxSessionManager = async ({ $ }: { $: any }) => {
       switch (event.type) {
         case 'session.status': {
           if (!sessionID) break
-          if (properties.status?.type === 'busy') busy.add(sessionID)
-          else busy.delete(sessionID)
+          if (properties.status?.type === 'busy' || properties.status?.type === 'retry') {
+            active.add(sessionID)
+            failed.delete(sessionID)
+          } else {
+            active.delete(sessionID)
+          }
+          await publish()
+          break
+        }
+
+        case 'session.error': {
+          if (!sessionID) break
+          active.delete(sessionID)
+          failed.add(sessionID)
+          await publish()
+          break
+        }
+
+        // Deprecated but still emitted after session.status(idle), and useful
+        // as a fallback when running against older OpenCode versions.
+        case 'session.idle': {
+          if (!sessionID) break
+          active.delete(sessionID)
           await publish()
           break
         }
 
         case 'permission.asked':
         case 'permission.v2.asked':
-        case 'question.asked': {
+        case 'question.asked':
+        case 'question.v2.asked': {
           if (!sessionID || properties.id == null) break
           addPending(sessionID, String(properties.id))
           await publish()
@@ -87,7 +122,9 @@ export const TmuxSessionManager = async ({ $ }: { $: any }) => {
         case 'permission.replied':
         case 'permission.v2.replied':
         case 'question.replied':
-        case 'question.rejected': {
+        case 'question.rejected':
+        case 'question.v2.replied':
+        case 'question.v2.rejected': {
           if (!sessionID || properties.requestID == null) break
           removePending(sessionID, String(properties.requestID))
           await publish()

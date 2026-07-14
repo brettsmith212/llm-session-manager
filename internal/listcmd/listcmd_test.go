@@ -74,6 +74,12 @@ func TestListCommandReturnsFromLivePaneWithoutRebuildingControlRoom(t *testing.T
 	if got := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_id}"); got != livePaneID {
 		t.Fatalf("control-room live pane was rebuilt: got %s, want %s", got, livePaneID)
 	}
+	if got := mustTmux(t, "show-options", "-wv", "-t", "origin:"+windowName, "pane-border-format"); !strings.Contains(got, "FOCUSED") {
+		t.Fatalf("reused control room has no explicit focus indicator: %q", got)
+	}
+	if got := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".0", "#{pane_title}"); got != "CONTROL ROOM" {
+		t.Fatalf("control-room pane title = %q, want CONTROL ROOM", got)
+	}
 	if got := llmuxtmux.GetGlobalOption("@llm_parent", ""); got != outer.Client {
 		t.Fatalf("@llm_parent = %q, want outer client %q", got, outer.Client)
 	}

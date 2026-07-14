@@ -1,31 +1,46 @@
 {
   "description": "Push Claude Code lifecycle events to llmux tmux session state",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "working"] }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"] }
         ]
       }
     ],
     "PostToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "working"] }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"] }
         ]
       }
     ],
     "SubagentStart": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
-        ]
-      }
-    ],
-    "TaskCreated": [
-      {
-        "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "async": true }
+          { "type": "command", "command": "llmux", "args": ["state", "working"] }
         ]
       }
     ],
@@ -43,6 +58,27 @@
         ]
       }
     ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "working"] }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog|agent_needs_input",
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"] }
+        ]
+      },
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -50,14 +86,14 @@
         ]
       }
     ],
-    "SubagentStop": [
+    "StopFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"] }
+          { "type": "command", "command": "llmux", "args": ["state", "waiting"] }
         ]
       }
     ],
-    "TaskCompleted": [
+    "SessionEnd": [
       {
         "hooks": [
           { "type": "command", "command": "llmux", "args": ["state", "idle"] }

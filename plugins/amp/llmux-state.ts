@@ -15,7 +15,7 @@ export default function (amp: PluginAPI) {
   function aggregate(): LlmuxState {
     let working = false
     for (const state of threadStates.values()) {
-      if (state === 'awaiting-approval') return 'waiting'
+      if (state === 'awaiting-approval' || state === 'error') return 'waiting'
       if (state === 'running') working = true
     }
     return working ? 'working' : 'idle'

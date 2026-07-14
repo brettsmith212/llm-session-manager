@@ -110,21 +110,8 @@ func ListCommand(clientName string) error {
 		return fmt.Errorf("split-window failed: %w", err)
 	}
 
-	// ── A: pane borders + titles so control room (left) and live agent (right) are
-	// visually distinct. Only the active pane gets a bright blue border; the
-	// inactive one stays muted. Each pane has its own title shown on top.
-	borderOpts := [][2]string{
-		{"pane-border-status", "top"},
-		{"pane-border-format", " #{pane_title} "},
-		{"pane-border-style", "fg=#6c7086"},             // Catppuccin Overlay0
-		{"pane-active-border-style", "fg=#89b4fa,bold"}, // Catppuccin Blue
-		{"pane-border-lines", "heavy"},
-	}
-	for _, o := range borderOpts {
-		_ = tmux.SetWindowOption(pickerTarget, o[0], o[1])
-	}
-	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".0", "-T", "◆ Control Room"})
-	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".1", "-T", "▶ Live · prefix u returns"})
+	styleControlRoom(pickerTarget)
+	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".1", "-T", "LIVE AGENT · prefix u returns"})
 
 	if _, err := tmux.Run([]string{
 		"respawn-pane", "-k",
@@ -165,11 +152,28 @@ func focusExistingControlRoom(host *tmux.ClientInfo) bool {
 	if !alive["0"] || !alive["1"] {
 		return false
 	}
+	// Refresh the styling as well as the focus so persistent rooms immediately
+	// pick up interface improvements without being torn down and rebuilt.
+	styleControlRoom(target)
 	if _, err := tmux.Run([]string{"select-pane", "-t", target + ".0"}); err != nil {
 		return false
 	}
 	_ = tmux.RunRaw([]string{"switch-client", "-c", host.Client, "-t", target})
 	return true
+}
+
+func styleControlRoom(target string) {
+	borderOpts := [][2]string{
+		{"pane-border-status", "top"},
+		{"pane-border-format", "#{?pane_active,#[fg=#89b4fa bold] ● FOCUSED · #{pane_title} #[default],#[fg=#6c7086]   #{pane_title} #[default]}"},
+		{"pane-border-style", "fg=#6c7086"},             // Catppuccin Overlay0
+		{"pane-active-border-style", "fg=#89b4fa,bold"}, // Catppuccin Blue
+		{"pane-border-lines", "heavy"},
+	}
+	for _, option := range borderOpts {
+		_ = tmux.SetWindowOption(target, option[0], option[1])
+	}
+	_ = tmux.RunRaw([]string{"select-pane", "-t", target + ".0", "-T", "CONTROL ROOM"})
 }
 
 // containingControlRoom returns the outer client displaying the control room

@@ -218,7 +218,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "respawn-pane", "-k", "-t", "origin:"+windowName+".0", helperCommand)
 
 	waitFor(t, 5*time.Second, "picker startup", func() bool {
-		return strings.Contains(capturePicker(), "Agents") && previewTitle() == "▶ Live · alpha-project · claude #0 · prefix u returns"
+		return strings.Contains(capturePicker(), "Agents") && previewTitle() == "LIVE AGENT · alpha-project · claude #0 · prefix u returns"
 	})
 
 	// Enter moves into the already-live agent without closing the control room.
@@ -244,7 +244,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "n")
 	waitFor(t, 2*time.Second, "global attention navigation", func() bool {
-		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "▶ Live · zeta-project · amp #0 · prefix u returns"
+		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "LIVE AGENT · zeta-project · amp #0 · prefix u returns"
 	})
 
 	// A delayed preview update must not pull focus back from the live pane.
@@ -252,7 +252,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".1")
 	waitFor(t, 2*time.Second, "focus-preserving preview update", func() bool {
 		active := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_active}")
-		return active == "1" && previewTitle() == "▶ Live · beta-project · opencode #0 · prefix u returns"
+		return active == "1" && previewTitle() == "LIVE AGENT · beta-project · opencode #0 · prefix u returns"
 	})
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".0")
 
@@ -263,7 +263,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	waitFor(t, 4*time.Second, "new session handoff", func() bool {
 		return tmuxSucceeds("has-session", "-t", "origin") &&
 			strings.Contains(capturePicker(), "3/4") &&
-			previewTitle() == "▶ Live · delta-project · codex #0 · prefix u returns"
+			previewTitle() == "LIVE AGENT · delta-project · codex #0 · prefix u returns"
 	})
 
 	// Waiting/working sessions require confirmation, Escape cancels, and the

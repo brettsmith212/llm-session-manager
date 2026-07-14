@@ -28,10 +28,14 @@ llmux = inputs.llmux.packages.${pkgs.system}.default;
 ### Install the Claude Code plugin
 
 ```nix
-home.file.".claude/plugins/llm-session-manager" = {
+home.file.".claude/skills/llm-session-manager" = {
   source = inputs.llmux.packages.${pkgs.system}.claude-plugin;
 };
 ```
+
+Claude Code auto-loads plugins with a manifest from its personal `skills`
+directory. Confirm it appears as `llm-session-manager@skills-dir` with
+`claude plugin list`, or inspect each loaded event and its source with `/hooks`.
 
 ### Install the Amp plugin
 

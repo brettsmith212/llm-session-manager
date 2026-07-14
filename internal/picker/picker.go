@@ -607,7 +607,7 @@ func (p *picker) updatePreview(session types.Session) {
 	// Refresh the live pane title with the name + window index so its border
 	// always tracks what is shown there and advertises the outer-tmux escape.
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
-		fmt.Sprintf("▶ Live · %s · %s #%d · prefix u returns", projectName(session), session.WindowName, session.WindowIndex),
+		fmt.Sprintf("LIVE AGENT · %s · %s #%d · prefix u returns", projectName(session), session.WindowName, session.WindowIndex),
 		"-t", ":" + windowName + ".1"})
 	p.previewWindowID = session.WindowID
 }
