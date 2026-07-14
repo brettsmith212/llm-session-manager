@@ -12,6 +12,7 @@ import (
 
 	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/types"
+	"llm-session-manager/internal/worktree"
 )
 
 func TestFilteredMatchesSessionMeaning(t *testing.T) {
@@ -111,7 +112,7 @@ func TestVisibleListRowsKeepSelectionOnScreen(t *testing.T) {
 	}
 }
 
-func TestListRowsGroupByAttentionAndWarnAboutSharedWorktrees(t *testing.T) {
+func TestListRowsGroupByAttentionAndDemoteSharedCheckoutNotice(t *testing.T) {
 	p := &picker{
 		sessions: []types.Session{
 			{Name: "shared", WindowID: "@1", Path: "/work/shared", State: types.Waiting},
@@ -125,20 +126,46 @@ func TestListRowsGroupByAttentionAndWarnAboutSharedWorktrees(t *testing.T) {
 	rows := p.buildListRows(p.filtered())
 	var text []string
 	warnings := 0
+	spacers := 0
 	for _, row := range rows {
 		text = append(text, row.text)
 		if row.kind == listRowWarning {
 			warnings++
 		}
+		if row.kind == listRowSpacer {
+			spacers++
+		}
 	}
 	joined := strings.Join(text, "|")
-	for _, want := range []string{"NEEDS YOU · 1", "ACTIVE · 1", "IDLE · 1", "main · 2 files · +4 · -1"} {
+	for _, want := range []string{"NEEDS YOU · 1", "ACTIVE · 1", "IDLE · 1", "main · 2 files · +4 · -1 · shared checkout · 2 agents"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("grouped rows %q do not contain %q", joined, want)
 		}
 	}
-	if warnings != 2 {
-		t.Fatalf("shared-worktree warnings = %d, want one in each state section", warnings)
+	if warnings != 0 {
+		t.Fatalf("shared-checkout warnings = %d, want none with only one working agent", warnings)
+	}
+	if spacers != 2 {
+		t.Fatalf("section spacers = %d, want two between three sections", spacers)
+	}
+}
+
+func TestListRowsWarnWhenMultipleAgentsAreActivelySharingCheckout(t *testing.T) {
+	p := &picker{sessions: []types.Session{
+		{Name: "shared", WindowID: "@1", Path: "/work/shared", State: types.Working},
+		{Name: "shared", WindowID: "@2", Path: "/work/shared", State: types.Working},
+	}}
+	warnings := 0
+	for _, row := range p.buildListRows(p.filtered()) {
+		if row.kind == listRowWarning {
+			warnings++
+			if row.text != "2 agents are active in this checkout" {
+				t.Fatalf("warning = %q", row.text)
+			}
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("active shared-checkout warnings = %d, want one", warnings)
 	}
 }
 
@@ -250,6 +277,9 @@ func TestSelectedRowHighlightContinuesBehindWindowNumber(t *testing.T) {
 	if lastHighlight < lastReset {
 		t.Fatal("selected row reset its background before the window number")
 	}
+	if !strings.Contains(output, "unnamed task") {
+		t.Fatalf("selected unlabeled session did not advertise explicit naming: %q", output)
+	}
 }
 
 func TestPreviewQueueCoalescesToTheFinalSelection(t *testing.T) {
@@ -355,6 +385,111 @@ func TestPopupAndReviewKeepControlRoomAlive(t *testing.T) {
 		return clientWindow(client) == "project" &&
 			strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName)
 	})
+
+	// A Control Room opened from a worktree can have the same pane path as
+	// the desired review host. It must never satisfy project-window lookup,
+	// or r merely switches to the already-visible Control Room and appears
+	// to do nothing.
+	worktreePath := t.TempDir()
+	mustTmux(t, "respawn-pane", "-k", "-t", "origin:"+windowName+".0", "-c", worktreePath, "sleep 1000")
+	mustTmux(t, "set-option", "-w", "-t", "origin:"+windowName, "@llm_control_room", "1")
+	mustTmux(t, "new-window", "-d", "-t", "origin:", "-n", "worktree-review", "-c", worktreePath, "sleep 1000")
+	mustTmux(t, "set-option", "-w", "-t", "origin:worktree-review", "automatic-rename", "off")
+	p.sessions[0].Path = worktreePath
+	mustTmux(t, "switch-client", "-c", client, "-t", "origin:"+windowName)
+	p.reviewProject()
+	waitFor(t, 2*time.Second, "worktree review ignores same-path control room", func() bool {
+		return clientWindow(client) == "worktree-review"
+	})
+}
+
+func TestCleanupSelectedWorktreeStopsAgentsAndKeepsBranch(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+
+	t.Setenv("TMUX", "")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	socketDir, err := os.MkdirTemp("/tmp", "llm-picker-cleanup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+
+	repository := t.TempDir()
+	mustGit(t, repository, "init", "-q", "-b", "main")
+	mustGit(t, repository, "config", "user.name", "llmux test")
+	mustGit(t, repository, "config", "user.email", "llmux@example.com")
+	if err := os.WriteFile(repository+"/flake.nix", []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repository, "add", "flake.nix")
+	mustGit(t, repository, "commit", "-qm", "initial")
+	repoInfo, err := worktree.Inspect(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := worktree.NewPlan(repoInfo, "Try Darwin Settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worktree.Create(plan); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := os.Stat(plan.Path); err == nil {
+			_ = worktree.DiscardCreated(plan)
+		}
+	})
+
+	mustTmux(t, "new-session", "-d", "-s", "origin", "-n", "project", "sleep 1000")
+	hostWindowID := mustTmux(t, "new-window", "-dP", "-t", "origin:", "-c", plan.Path, "-F", "#{window_id}", "sleep 1000")
+	mustTmux(t, "set-option", "-w", "-t", hostWindowID, worktreeHostOption, plan.Path)
+	mustTmux(t, "new-session", "-d", "-s", "llm-worktree", "-n", "amp", "-c", plan.Path, "sleep 1000")
+	windowID := mustTmux(t, "display-message", "-p", "-t", "llm-worktree:0", "#{window_id}")
+	mustTmux(t, "set-option", "-t", "llm-worktree", "@llm_path", plan.Path)
+	mustTmux(t, "set-option", "-w", "-t", windowID, "@llm_path", plan.Path)
+	mustTmux(t, "set-option", "-w", "-t", windowID, "@llm_agent", "amp")
+
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{
+		prefix:       "llm-",
+		previewTimer: timer,
+		gitByPath:    map[string]gitInfo{},
+		sessions: []types.Session{{
+			Name: "llm-worktree", WindowID: windowID, WindowName: "amp",
+			Path: plan.Path, State: types.Idle, DisplayState: types.Idle,
+		}},
+	}
+
+	captureStdout(t, p.cleanupSelectedWorktree)
+	if gitPathKey(p.confirmWorktree) != gitPathKey(plan.Path) || !tmuxSucceeds("has-session", "-t", "llm-worktree") {
+		t.Fatal("first cleanup key did not request confirmation without changing the worktree")
+	}
+	captureStdout(t, p.cleanupSelectedWorktree)
+	if tmuxSucceeds("has-session", "-t", "llm-worktree") {
+		t.Fatal("cleanup left the managed agent session running")
+	}
+	windows, _ := runTmux("list-windows", "-a", "-F", "#{window_id}|#{@llm_worktree_host}|#{pane_current_path}")
+	if strings.Contains(windows, hostWindowID+"|") {
+		t.Fatalf("cleanup left the llmux-created worktree host window:\n%s", windows)
+	}
+	if _, err := os.Stat(plan.Path); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left worktree directory: %v", err)
+	}
+	branchOutput, err := exec.Command("git", "-C", repository, "branch", "--list", plan.Branch).CombinedOutput()
+	if err != nil || !strings.Contains(string(branchOutput), plan.Branch) {
+		t.Fatalf("cleanup did not retain branch %s: %v\n%s", plan.Branch, err, branchOutput)
+	}
 }
 
 func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
@@ -437,10 +572,22 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	newWindowID := addManagedTestSession(t, "llm-delta", "codex", "/tmp/delta-project", types.Idle)
 	mustTmux(t, "set-option", "-w", "-t", "origin:"+windowName, pickerSelectionOption, newWindowID)
 	waitFor(t, 4*time.Second, "new session handoff", func() bool {
+		screen := capturePicker()
 		return tmuxSucceeds("has-session", "-t", "origin") &&
-			strings.Contains(capturePicker(), "4/4") &&
-			strings.Contains(capturePicker(), "task:") &&
+			strings.Contains(screen, "4/4") &&
+			strings.Contains(screen, "✓ CREATED") &&
+			strings.Contains(screen, "e name task · Enter live · o popup") &&
+			!strings.Contains(screen, "EDIT TASK LABEL") &&
 			previewTitle() == "LIVE AGENT · delta-project · codex #0 · prefix u returns"
+	})
+	// Creation returns to normal navigation. Naming is an explicit mode entered
+	// with e, and that mode occupies a prominent full-width accent area.
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "e")
+	waitFor(t, 2*time.Second, "explicit task label editor", func() bool {
+		screen := capturePicker()
+		return strings.Contains(screen, "EDIT TASK LABEL") &&
+			strings.Contains(screen, "delta-project · codex #0") &&
+			strings.Contains(screen, "Task ›")
 	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "-l", "Refactor picker")
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "Enter")

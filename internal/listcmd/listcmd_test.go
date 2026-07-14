@@ -80,6 +80,9 @@ func TestListCommandReturnsFromLivePaneWithoutRebuildingControlRoom(t *testing.T
 	if got := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".0", "#{pane_title}"); got != "CONTROL ROOM" {
 		t.Fatalf("control-room pane title = %q, want CONTROL ROOM", got)
 	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", "origin:"+windowName, "@llm_control_room"); got != "1" {
+		t.Fatalf("control-room ownership marker = %q, want 1", got)
+	}
 	if got := llmuxtmux.GetGlobalOption("@llm_parent", ""); got != outer.Client {
 		t.Fatalf("@llm_parent = %q, want outer client %q", got, outer.Client)
 	}

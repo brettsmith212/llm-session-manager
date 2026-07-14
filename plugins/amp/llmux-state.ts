@@ -46,16 +46,22 @@ export default function (amp: PluginAPI) {
     if (subscribed.has(thread.id)) return
     subscribed.add(thread.id)
 
-    let stateWasEmitted = false
+    let stateVersion = 0
     thread.state.subscribe((state: ThreadState) => {
-      stateWasEmitted = true
+      stateVersion++
       threadStates.set(thread.id, state)
       void publish()
     })
 
+    // Subscribe first so no transition can be missed, then reconcile with a
+    // snapshot. Amp can emit a transient startup state during subscribe; that
+    // must not prevent a subsequent get() from settling llmux back to idle.
+    // Conversely, an event emitted while get() is in flight is newer than the
+    // snapshot and must win.
+    const versionBeforeGet = stateVersion
     try {
       const current = await thread.state.get()
-      if (!stateWasEmitted) {
+      if (stateVersion === versionBeforeGet) {
         threadStates.set(thread.id, current)
         await publish()
       }
@@ -83,4 +89,9 @@ export default function (amp: PluginAPI) {
       }
     },
   )
+
+  // A fresh interactive Amp can be waiting at the prompt before it has a
+  // thread, so session.start may not fire until the first message. Clear
+  // llmux's initial "starting" state as soon as the plugin itself is ready.
+  void publish()
 }

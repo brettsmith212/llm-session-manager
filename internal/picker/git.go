@@ -8,17 +8,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"llm-session-manager/internal/worktree"
 )
 
 const gitCommandTimeout = 750 * time.Millisecond
 
 type gitInfo struct {
-	valid     bool
-	branch    string
-	changed   int
-	additions int
-	deletions int
-	untracked int
+	valid           bool
+	branch          string
+	changed         int
+	additions       int
+	deletions       int
+	untracked       int
+	managedWorktree bool
+	repository      string
 }
 
 func gitPathKey(path string) string {
@@ -60,6 +64,10 @@ func inspectGit(path string) gitInfo {
 	}
 
 	info := gitInfo{valid: true}
+	if manifest, err := worktree.Load(path); err == nil {
+		info.managedWorktree = true
+		info.repository = manifest.Repository
+	}
 	oid := ""
 	for _, line := range strings.Split(status, "\n") {
 		switch {
@@ -118,6 +126,9 @@ func formatGitInfo(info gitInfo) string {
 	parts := []string{info.branch}
 	if info.changed == 0 && info.untracked == 0 {
 		parts = append(parts, "clean")
+		if info.managedWorktree {
+			parts = append(parts, "isolated")
+		}
 		return strings.Join(parts, " · ")
 	}
 	if info.changed > 0 {
@@ -135,6 +146,9 @@ func formatGitInfo(info gitInfo) string {
 	}
 	if info.untracked > 0 {
 		parts = append(parts, fmt.Sprintf("?%d", info.untracked))
+	}
+	if info.managedWorktree {
+		parts = append(parts, "isolated")
 	}
 	return strings.Join(parts, " · ")
 }

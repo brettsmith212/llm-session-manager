@@ -163,6 +163,7 @@ func focusExistingControlRoom(host *tmux.ClientInfo) bool {
 }
 
 func styleControlRoom(target string) {
+	_ = tmux.SetWindowOption(target, "@llm_control_room", "1")
 	borderOpts := [][2]string{
 		{"pane-border-status", "top"},
 		{"pane-border-format", "#{?pane_active,#[fg=#89b4fa bold] ● FOCUSED · #{pane_title} #[default],#[fg=#6c7086]   #{pane_title} #[default]}"},

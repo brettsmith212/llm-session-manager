@@ -20,11 +20,13 @@ import (
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 	"llm-session-manager/internal/types"
+	"llm-session-manager/internal/worktree"
 )
 
 const (
 	windowName            = "llm-picker"
 	pickerSelectionOption = "@llm_picker_selection"
+	worktreeHostOption    = "@llm_worktree_host"
 	previewDelay          = 75 * time.Millisecond
 	gitRefreshInterval    = 4 * time.Second
 )
@@ -140,6 +142,7 @@ type picker struct {
 	activateErr       string // set when activateSession fails to reach the origin window
 	confirmStopID     string
 	confirmLabel      string
+	confirmWorktree   string
 	notice            string
 	noticeError       bool
 	popupClosed       chan struct{}
@@ -260,14 +263,24 @@ func (p *picker) requestGitRefresh() {
 	}()
 }
 
-func (p *picker) sharedPathCounts() map[string]int {
-	counts := make(map[string]int)
+type pathActivity struct {
+	total   int
+	working int
+}
+
+func (p *picker) pathActivity() map[string]pathActivity {
+	activity := make(map[string]pathActivity)
 	for _, session := range p.sessions {
 		if key := gitPathKey(session.Path); key != "" {
-			counts[key]++
+			value := activity[key]
+			value.total++
+			if sessionState(session) == types.Working {
+				value.working++
+			}
+			activity[key] = value
 		}
 	}
-	return counts
+	return activity
 }
 
 // formatBadge renders an agent name as colored text (no brackets, no
@@ -348,14 +361,34 @@ func (p *picker) render() {
 	}
 	frame.lineBg(1, header, ansi.Surface0)
 
+	dividerRow := 3
+	row := 4
 	if p.isEditingLabel {
+		editorContext := "selected session"
+		for _, session := range p.sessions {
+			if session.WindowID != p.editLabelID {
+				continue
+			}
+			agentName := session.WindowName
+			if agentName == "" {
+				agentName = "agent"
+			}
+			editorContext = fmt.Sprintf("%s · %s #%d", projectName(session), agentName, session.WindowIndex)
+			break
+		}
 		before := p.editLabelValue[:p.editLabelCursor]
 		after := p.editLabelValue[p.editLabelCursor:]
-		frame.line(2, fmt.Sprintf("  %stask:%s %s%s%s_%s%s  %senter save · esc cancel · ^u clear%s",
-			ansi.Foreground(ansi.Overlay0), ansi.Reset,
+		frame.lineBg(2, fmt.Sprintf("  %s%s✎ EDIT TASK LABEL%s  %s%s%s",
+			ansi.Foreground(ansi.Blue), ansi.Bold, ansi.Reset,
+			ansi.Foreground(ansi.Text), editorContext, ansi.Reset), ansi.Surface1)
+		frame.lineBg(3, fmt.Sprintf("  %s%sTask ›%s %s%s%s█%s%s%s",
+			ansi.Foreground(ansi.Mauve), ansi.Bold, ansi.Reset,
 			ansi.Foreground(ansi.Text), before, ansi.Foreground(ansi.Blue),
-			ansi.Foreground(ansi.Text), after,
-			ansi.Foreground(ansi.Overlay0), ansi.Reset))
+			ansi.Foreground(ansi.Text), after, ansi.Reset), ansi.Surface1)
+		frame.lineBg(4, fmt.Sprintf("  %sEnter save · Esc cancel · ^U clear%s",
+			ansi.Foreground(ansi.Subtext0), ansi.Reset), ansi.Surface1)
+		dividerRow = 5
+		row = 6
 	} else if p.isSearching {
 		frame.line(2, fmt.Sprintf("  %s/%s%s%s%s_%s  %sesc cancel · enter keep%s",
 			ansi.Foreground(ansi.Overlay0), ansi.Reset,
@@ -375,10 +408,16 @@ func (p *picker) render() {
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset))
 	}
-	frame.line(3, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Surface0), strings.Repeat("─", max(0, cols-4)), ansi.Reset))
+	frame.line(dividerRow, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Surface0), strings.Repeat("─", max(0, cols-4)), ansi.Reset))
 
-	row := 4
-	if p.confirmStopID != "" {
+	if p.confirmWorktree != "" {
+		const confirmationSuffix = "?  D confirm · esc cancel · branch kept"
+		labelWidth := max(1, cols-utf8.RuneCountInString("  remove "+confirmationSuffix))
+		label := truncateVisible(filepath.Base(p.confirmWorktree), "", "", labelWidth)
+		frame.line(row, fmt.Sprintf("  %sremove %s%s%s",
+			ansi.Foreground(ansi.Yellow), label, confirmationSuffix, ansi.Reset))
+		row++
+	} else if p.confirmStopID != "" {
 		const confirmationSuffix = "?  ^x confirm · esc cancel"
 		labelWidth := max(1, cols-utf8.RuneCountInString("  stop "+confirmationSuffix))
 		label := truncateVisible(p.confirmLabel, "", "", labelWidth)
@@ -388,6 +427,11 @@ func (p *picker) render() {
 	} else if p.activateErr != "" {
 		frame.line(row, fmt.Sprintf("  %scouldn't switch to parent: %s%s",
 			ansi.Foreground(ansi.Red), p.activateErr, ansi.Reset))
+		row++
+	} else if strings.HasPrefix(p.notice, "created ") {
+		frame.lineBg(row, fmt.Sprintf("  %s%s✓ CREATED%s  %s%s%s",
+			ansi.Foreground(ansi.Green), ansi.Bold, ansi.Reset,
+			ansi.Foreground(ansi.Text), strings.TrimPrefix(p.notice, "created "), ansi.Reset), ansi.Surface0)
 		row++
 	} else if p.notice != "" {
 		color := ansi.Green
@@ -400,9 +444,15 @@ func (p *picker) render() {
 
 	footerRow := rows
 	if rows >= 6 {
-		footer := "  a add · e label · n needs you · s agent · ^x stop · q close"
+		footer := "  a add · A worktree · e label · n needs you · s agent · ^x stop · q close"
+		if p.selectedIsManagedWorktree() {
+			footer = "  a add · A worktree · D cleanup · e label · n needs you · ^x stop · q close"
+		}
 		if cols < 60 {
-			footer = "  a add · e label · n next · ^x stop · q"
+			footer = "  a add · A tree · e label · n next · ^x stop · q"
+			if p.selectedIsManagedWorktree() {
+				footer = "  a add · A tree · D clean · n next · ^x stop · q"
+			}
 		}
 		frame.line(footerRow, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Overlay0), footer, ansi.Reset))
 	} else {
@@ -434,7 +484,9 @@ func (p *picker) render() {
 		case listRowSection:
 			text := "  ── " + listRow.text + " "
 			text += strings.Repeat("─", max(0, cols-utf8.RuneCountInString(text)-2))
-			frame.line(row, fmt.Sprintf("%s%s%s", ansi.Foreground(listRow.color), text, ansi.Reset))
+			frame.line(row, fmt.Sprintf("%s%s%s%s", ansi.Foreground(listRow.color), ansi.Bold, text, ansi.Reset))
+			row++
+		case listRowSpacer:
 			row++
 		case listRowProject:
 			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), listRow.text, ansi.Reset))
@@ -456,6 +508,7 @@ type listRowKind int
 
 const (
 	listRowSection listRowKind = iota
+	listRowSpacer
 	listRowProject
 	listRowGit
 	listRowWarning
@@ -478,13 +531,16 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 	for _, session := range list {
 		stateCounts[stateRank(sessionState(session))]++
 	}
-	shared := p.sharedPathCounts()
+	activity := p.pathActivity()
 	rows := make([]pickerListRow, 0, len(list)*2)
 	previousRank := -1
 	previousProject := ""
 	for i, session := range list {
 		rank := stateRank(sessionState(session))
 		if rank != previousRank {
+			if previousRank != -1 {
+				rows = append(rows, pickerListRow{kind: listRowSpacer})
+			}
 			name := "ACTIVE"
 			color := ansi.Blue
 			if rank == 0 {
@@ -492,7 +548,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 				color = ansi.Yellow
 			} else if rank == 2 {
 				name = "IDLE"
-				color = ansi.Overlay0
+				color = ansi.Subtext0
 			}
 			rows = append(rows, pickerListRow{kind: listRowSection, text: fmt.Sprintf("%s · %d", name, stateCounts[rank]), color: color})
 			previousRank = rank
@@ -508,12 +564,24 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			if path == "" {
 				path = session.Name
 			}
-			rows = append(rows, pickerListRow{kind: listRowProject, text: path})
-			if git := formatGitInfo(p.gitByPath[projectKey]); git != "" {
-				rows = append(rows, pickerListRow{kind: listRowGit, text: git})
+			if info := p.gitByPath[projectKey]; info.managedWorktree {
+				path = fmt.Sprintf("%s · isolated/%s", info.repository, filepath.Base(session.Path))
 			}
-			if count := shared[projectKey]; count > 1 {
-				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents share this worktree", count)})
+			rows = append(rows, pickerListRow{kind: listRowProject, text: path})
+			metadata := formatGitInfo(p.gitByPath[projectKey])
+			if shared := activity[projectKey]; shared.total > 1 {
+				sharedText := fmt.Sprintf("shared checkout · %d agents", shared.total)
+				if metadata == "" {
+					metadata = sharedText
+				} else {
+					metadata += " · " + sharedText
+				}
+			}
+			if metadata != "" {
+				rows = append(rows, pickerListRow{kind: listRowGit, text: metadata})
+			}
+			if shared := activity[projectKey]; rank == stateRank(types.Working) && shared.working > 1 {
+				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents are active in this checkout", shared.working)})
 			}
 			previousProject = projectKey
 		}
@@ -581,8 +649,16 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 	}
 	detailWidth := max(0, cols-prefixWidth-suffixWidth)
 	detail := strings.TrimSpace(session.Label)
+	unnamed := detail == "" && selected
 	if detail == "" {
-		detail = ago
+		if selected {
+			detail = "unnamed task"
+			if detailWidth >= utf8.RuneCountInString(detail)+utf8.RuneCountInString(ago)+3 {
+				detail += "  " + ago
+			}
+		} else {
+			detail = ago
+		}
 	} else if detailWidth >= utf8.RuneCountInString(detail)+utf8.RuneCountInString(ago)+3 {
 		detail += "  " + ago
 	}
@@ -598,11 +674,15 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 		dot := ansi.Foreground(stateColor)
 		txt := ansi.Foreground(ansi.Text)
 		muted := ansi.Foreground(ansi.Overlay2)
+		detailColor := txt
+		if unnamed {
+			detailColor = muted
+		}
 
 		line1 := "  " +
 			accent + connector + " " +
 			dot + stateSymbol + " " + txt + statePadded + " " +
-			txt + detail + muted + padding + separator +
+			detailColor + detail + muted + padding + separator +
 			badge + ansi.Background(ansi.Surface0) + muted + windowNumber
 
 		frame.lineBg(row, line1, ansi.Surface0)
@@ -631,7 +711,7 @@ func statePresentation(state types.State) (symbol, label string, color ansi.RGB)
 	case types.Working:
 		return "●", "working", ansi.Blue
 	case types.Idle:
-		return "·", "idle", ansi.Overlay0
+		return "·", "idle", ansi.Subtext0
 	default:
 		return "·", "starting", ansi.Overlay0
 	}
@@ -838,6 +918,7 @@ func (p *picker) changeSelection(delta int) {
 	p.activateErr = ""
 	p.confirmStopID = ""
 	p.confirmLabel = ""
+	p.confirmWorktree = ""
 	p.notice = ""
 	list := p.filtered()
 	p.selectedIndex = max(0, min(len(list)-1, p.selectedIndex+delta))
@@ -847,6 +928,7 @@ func (p *picker) changeSelection(delta int) {
 func (p *picker) selectNextWaiting() {
 	p.confirmStopID = ""
 	p.confirmLabel = ""
+	p.confirmWorktree = ""
 	currentID := ""
 	filtered := p.filtered()
 	if p.selectedIndex < len(filtered) {
@@ -948,10 +1030,15 @@ func (p *picker) selectCreatedSession() bool {
 		p.activateErr = ""
 		p.confirmStopID = ""
 		p.confirmLabel = ""
-		p.notice = ""
+		p.confirmWorktree = ""
+		action := "name task"
+		if created.Label != "" {
+			action = "edit task"
+		}
+		p.notice = fmt.Sprintf("created e %s · Enter live · o popup", action)
+		p.noticeError = false
 		_ = tmux.SetWindowOption(windowName, pickerSelectionOption, "")
 		p.queuePreview(session)
-		p.beginLabelEdit(session)
 		return true
 	}
 	return false
@@ -996,10 +1083,16 @@ func (p *picker) switchToProject(session types.Session) bool {
 		p.render()
 		return false
 	}
-	if err := tmux.EnsureOriginWindow(origin, session.Path, parent); err != nil {
+	host, err := tmux.EnsureOriginWindowTarget(origin, session.Path, parent)
+	if err != nil {
 		p.activateErr = err.Error()
 		p.render()
 		return false
+	}
+	if host.Created {
+		if manifest, err := worktree.Load(session.Path); err == nil {
+			_ = tmux.SetWindowOption(host.ID, worktreeHostOption, manifest.WorktreePath)
+		}
 	}
 	p.activateErr = ""
 	return true
@@ -1044,6 +1137,123 @@ func (p *picker) activateSession() {
 		return
 	}
 	go func() { _ = cmd.Wait() }()
+}
+
+func (p *picker) selectedIsManagedWorktree() bool {
+	list := p.filtered()
+	if p.selectedIndex < 0 || p.selectedIndex >= len(list) {
+		return false
+	}
+	if info := p.gitByPath[gitPathKey(list[p.selectedIndex].Path)]; info.managedWorktree {
+		return true
+	}
+	_, err := worktree.Load(list[p.selectedIndex].Path)
+	return err == nil
+}
+
+// cleanupSelectedWorktree stops every agent sharing the selected isolated
+// checkout, removes only llmux-created host windows, and asks Git to remove the
+// clean worktree. Its branch is always retained.
+func (p *picker) cleanupSelectedWorktree() {
+	list := p.filtered()
+	if p.selectedIndex < 0 || p.selectedIndex >= len(list) {
+		return
+	}
+	session := list[p.selectedIndex]
+	manifest, err := worktree.ValidateRemoval(session.Path)
+	if err != nil {
+		p.confirmWorktree = ""
+		p.notice = err.Error()
+		p.noticeError = true
+		p.render()
+		return
+	}
+	if err := p.validateWorktreePanes(session.Name, manifest.WorktreePath); err != nil {
+		p.confirmWorktree = ""
+		p.notice = err.Error()
+		p.noticeError = true
+		p.render()
+		return
+	}
+	if p.confirmWorktree != manifest.WorktreePath {
+		p.confirmWorktree = manifest.WorktreePath
+		p.confirmStopID = ""
+		p.confirmLabel = ""
+		p.notice = ""
+		p.activateErr = ""
+		p.render()
+		return
+	}
+	p.confirmWorktree = ""
+
+	if tmux.HasSession(session.Name) {
+		if err := tmux.KillSession(session.Name); err != nil {
+			p.notice = "couldn't stop worktree agents: " + err.Error()
+			p.noticeError = true
+			p.render()
+			return
+		}
+	}
+	p.killManagedWorktreeHosts(manifest.WorktreePath)
+	removed, err := worktree.Remove(manifest.WorktreePath)
+	if err != nil {
+		p.notice = "agents stopped, but worktree cleanup failed: " + err.Error()
+		p.noticeError = true
+		p.replaceSessions(sessions.GetAllSessions(p.prefix))
+		p.renderSelection()
+		return
+	}
+
+	p.replaceSessions(sessions.GetAllSessions(p.prefix))
+	_ = sessions.PublishWaitingStatus(p.sessions)
+	p.notice = "removed isolated worktree; branch " + removed.Branch + " kept"
+	p.noticeError = false
+	p.activateErr = ""
+	if p.selectedIndex >= len(p.filtered()) {
+		p.selectedIndex = max(0, len(p.filtered())-1)
+	}
+	p.renderSelection()
+}
+
+func (p *picker) validateWorktreePanes(agentSession, path string) error {
+	result := tmux.RunRaw([]string{"list-panes", "-a", "-F",
+		"#{session_name}\t#{window_id}\t#{session_windows}\t#{pane_current_path}\t#{@llm_worktree_host}"})
+	if result.ExitCode != 0 {
+		return fmt.Errorf("couldn't inspect tmux panes before cleanup: %s", result.Stderr)
+	}
+	targetPath := gitPathKey(path)
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) != 5 || gitPathKey(parts[3]) != targetPath {
+			continue
+		}
+		if parts[0] == agentSession {
+			continue
+		}
+		if parts[2] != "1" && gitPathKey(parts[4]) == targetPath {
+			continue
+		}
+		return fmt.Errorf("worktree is open in tmux window %s; close it before cleanup", parts[1])
+	}
+	return nil
+}
+
+func (p *picker) killManagedWorktreeHosts(path string) {
+	result := tmux.RunRaw([]string{"list-windows", "-a", "-F", "#{window_id}\t#{session_windows}\t#{@llm_worktree_host}"})
+	if result.ExitCode != 0 {
+		return
+	}
+	targetPath := gitPathKey(path)
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		parts := strings.SplitN(line, "\t", 3)
+		// Never let task cleanup kill an entire user session. Under ordinary
+		// operation the origin also contains the Control Room or another
+		// project window; a one-window edge case is safer left for the user.
+		if len(parts) != 3 || parts[1] == "1" || gitPathKey(parts[2]) != targetPath {
+			continue
+		}
+		_ = tmux.KillWindow(parts[0])
+	}
 }
 
 func (p *picker) killSelected() {
@@ -1107,6 +1317,7 @@ func (p *picker) beginLabelEdit(session types.Session) {
 	p.activateErr = ""
 	p.confirmStopID = ""
 	p.confirmLabel = ""
+	p.confirmWorktree = ""
 	p.notice = ""
 }
 
@@ -1234,6 +1445,7 @@ func (p *picker) cycleAgent() {
 	p.activateErr = ""
 	p.confirmStopID = ""
 	p.confirmLabel = ""
+	p.confirmWorktree = ""
 	p.notice = ""
 	p.render()
 }
@@ -1283,12 +1495,21 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.selectedIndex = 0
 			p.confirmStopID = ""
 			p.confirmLabel = ""
+			p.confirmWorktree = ""
 			p.notice = ""
 			p.render()
 		case "a":
 			p.confirmStopID = ""
 			p.confirmLabel = ""
+			p.confirmWorktree = ""
 			p.openCreatePopup()
+		case "A":
+			p.confirmStopID = ""
+			p.confirmLabel = ""
+			p.confirmWorktree = ""
+			p.openWorktreeCreatePopup()
+		case "D":
+			p.cleanupSelectedWorktree()
 		case "e":
 			p.editSelectedLabel()
 		case "n":
@@ -1296,11 +1517,13 @@ func (p *picker) handleKeys(data string) (done bool) {
 		case "s":
 			p.cycleAgent()
 		case "\x18": // ^x
+			p.confirmWorktree = ""
 			p.killSelected()
 		case "\x1b": // esc
-			if p.confirmStopID != "" {
+			if p.confirmStopID != "" || p.confirmWorktree != "" {
 				p.confirmStopID = ""
 				p.confirmLabel = ""
+				p.confirmWorktree = ""
 				p.render()
 				continue
 			}
@@ -1353,6 +1576,22 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 }
 
 func (p *picker) openCreatePopup() {
+	defaultPath := p.createDefaultPath()
+	p.startCreatePopup(binaryPath()+" prompt "+tmux.ShellQuote(defaultPath), "30%")
+}
+
+func (p *picker) openWorktreeCreatePopup() {
+	defaultPath := p.createDefaultPath()
+	if _, err := worktree.Inspect(defaultPath); err != nil {
+		p.notice = err.Error()
+		p.noticeError = true
+		p.render()
+		return
+	}
+	p.startCreatePopup(binaryPath()+" worktree-prompt "+tmux.ShellQuote(defaultPath), "55%")
+}
+
+func (p *picker) createDefaultPath() string {
 	list := p.filtered()
 	defaultPath := ""
 	if p.selectedIndex < len(list) {
@@ -1363,15 +1602,16 @@ func (p *picker) openCreatePopup() {
 			defaultPath = cwd
 		}
 	}
+	return defaultPath
+}
 
+func (p *picker) startCreatePopup(command, height string) {
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
-	height := "30%"
-
 	cmd := exec.Command("tmux", "display-popup",
 		"-w", width,
 		"-h", height,
 		"-E",
-		binaryPath()+" prompt "+tmux.ShellQuote(defaultPath))
+		command)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil

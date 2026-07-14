@@ -136,7 +136,7 @@ func handleKey(keys string, path *string, cursor *int, errMsg *string, origin st
 	}
 	code := keys[0]
 	switch {
-	case code == 27 || code == 3: // esc or ctrl-c
+	case keys == "\x1b" || code == 3: // bare esc or ctrl-c
 		return true
 	case code == 13: // enter
 		abs, err := validatePath(*path)

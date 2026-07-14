@@ -73,6 +73,8 @@ llmux launch <cwd> <window_id>   # create a session for a new agent
 llmux warm <cwd>                 # pre-warm a session in the background (hidden from picker)
 llmux list                         # open the agent control room
 llmux state <working|waiting|idle> # update session state from a hook
+llmux worktree list                # list llmux-owned isolated worktrees
+llmux worktree remove <path>       # safely remove a clean worktree; keep its branch
 ```
 
 ### Tmux options
@@ -118,10 +120,17 @@ the right pane is the selected agent's live terminal:
 - `Shift+Enter` also opens the popup when the terminal and tmux modified-key
   configuration distinguish it from Enter; `o` is the portable binding.
 - `r` goes directly to the selected project window for Neovim/diff review.
-- `a` creates another session, returns with it selected, and offers an optional
-  task label.
-- `e` edits the selected session's task label. Labels are stored in the tmux
-  window's `@llm_label` option; internal hash-based session names do not change.
+- `a` creates another session and returns to normal navigation with it selected
+  and previewed. A creation bar advertises `e` for optional naming; typing is
+  never captured implicitly. When the selected project already has a managed
+  session, the new agent shares that checkout.
+- `A` creates an agent in a new isolated Git worktree based on the selected
+  project's committed `HEAD`. It asks for the task name before creating it.
+- `D` removes a selected llmux-created worktree after confirmation. Cleanup
+  refuses dirty worktrees, stops every agent sharing it, and keeps its branch.
+- `e` opens the selected session's prominent task-label editor. Labels are
+  stored in the tmux window's `@llm_label` option; internal hash-based session
+  names do not change.
 - `n` jumps to the next agent that needs attention, even when a filter hides it.
 - `/` searches paths, task labels, branches, agents, and states.
 - `Ctrl+x` stops the selected agent. Working and waiting agents require a
@@ -131,13 +140,47 @@ Sessions are grouped into **Needs You**, **Active**, and **Idle** sections, then
 by project. Git repositories show their local branch and compact working-tree
 summary (`main · 3 files · +24 · -6 · ?1`). Clean repositories show
 `main · clean`; non-Git or unavailable directories omit that line. Git reads
-are local, cached, and never fetch from a remote. Projects with multiple agents
-in the same working directory show a shared-worktree warning.
+are local, cached, and never fetch from a remote. Multiple agents in the same
+working directory appear as muted `shared checkout` metadata; this becomes a
+yellow warning only when more than one of them is actively working.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.
 `Ctrl+a u` then reopens the same persistent control room rather than rebuilding
 it.
+
+### Isolated worktree agents
+
+Uppercase `A` is an additive alternative to the ordinary `a` flow. It creates
+a task branch and checkout beneath the XDG data directory:
+
+```text
+~/.local/share/llmux/worktrees/<repository>-<hash>/<task>/
+```
+
+For example, an isolated `Try Nixvim Upgrade` task selected from
+`~/.config/nix-config` gets a branch such as
+`llmux/try-nixvim-upgrade` and a separate checkout under the directory above.
+The original `~/.config/nix-config` checkout is not moved or modified. Git
+objects and history remain shared with it.
+
+The worktree starts from the selected checkout's committed `HEAD`.
+Uncommitted and untracked source-checkout changes are not copied; the creation
+prompt warns when they exist. Gitignored environment files are likewise not
+copied automatically. If you later add ignored files inside the isolated
+checkout, move anything important elsewhere before cleanup: like Git's native
+`worktree remove`, llmux may remove ignored files without treating them as
+pending changes.
+
+`r` creates or selects a normal parent tmux window at the isolated checkout,
+and `o` opens the agent over that exact window. Closing the popup therefore
+returns to the correct worktree for Neovim and Git review.
+
+llmux records ownership manifests under `~/.local/share/llmux/tasks`, so
+worktrees remain discoverable with `llmux worktree list` even after their tmux
+sessions stop. `D` and `llmux worktree remove` only remove clean llmux-owned
+worktrees and always retain their branches. Delete a merged branch separately
+with Git when you no longer need it.
 
 ### Switching agents
 
