@@ -165,6 +165,15 @@ func TestPreviewQueueCoalescesToTheFinalSelection(t *testing.T) {
 	}
 }
 
+func TestParseKeysPreservesModifiedEnterSequences(t *testing.T) {
+	for _, sequence := range []string{"\x1b[13;2u", "\x1b[27;2;13~"} {
+		got := parseKeys(sequence)
+		if len(got) != 1 || got[0] != sequence {
+			t.Fatalf("parseKeys(%q) = %#v, want one complete modified-enter token", sequence, got)
+		}
+	}
+}
+
 // TestPickerHelperProcess runs the real picker inside a tmux pane for the
 // isolated workflow test below. It is a no-op during a normal test process.
 func TestPickerHelperProcess(t *testing.T) {
@@ -209,8 +218,16 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "respawn-pane", "-k", "-t", "origin:"+windowName+".0", helperCommand)
 
 	waitFor(t, 5*time.Second, "picker startup", func() bool {
-		return strings.Contains(capturePicker(), "Sessions") && previewTitle() == "▶ Preview · alpha-project · claude #0"
+		return strings.Contains(capturePicker(), "Agents") && previewTitle() == "▶ Live · alpha-project · claude #0 · prefix u returns"
 	})
+
+	// Enter moves into the already-live agent without closing the control room.
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "Enter")
+	waitFor(t, 2*time.Second, "live preview focus", func() bool {
+		active := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_active}")
+		return active == "1" && strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName)
+	})
+	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".0")
 
 	// Pasted command characters outside search mode are inert.
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "-l", "\x1b[200~q\x1b[201~")
@@ -227,7 +244,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "n")
 	waitFor(t, 2*time.Second, "global attention navigation", func() bool {
-		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "▶ Preview · zeta-project · amp #0"
+		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "▶ Live · zeta-project · amp #0 · prefix u returns"
 	})
 
 	// A delayed preview update must not pull focus back from the live pane.
@@ -235,7 +252,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".1")
 	waitFor(t, 2*time.Second, "focus-preserving preview update", func() bool {
 		active := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_active}")
-		return active == "1" && previewTitle() == "▶ Preview · beta-project · opencode #0"
+		return active == "1" && previewTitle() == "▶ Live · beta-project · opencode #0 · prefix u returns"
 	})
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".0")
 
@@ -246,7 +263,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	waitFor(t, 4*time.Second, "new session handoff", func() bool {
 		return tmuxSucceeds("has-session", "-t", "origin") &&
 			strings.Contains(capturePicker(), "3/4") &&
-			previewTitle() == "▶ Preview · delta-project · codex #0"
+			previewTitle() == "▶ Live · delta-project · codex #0 · prefix u returns"
 	})
 
 	// Waiting/working sessions require confirmation, Escape cancels, and the
@@ -283,6 +300,14 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	if strings.Contains(capturePicker(), "^x confirm") {
 		t.Fatal("idle session unexpectedly required stop confirmation")
 	}
+
+	// The explicit popup action retains the old activation handoff. This
+	// isolated server has no attached parent client, so activation is observable
+	// as the control-room window closing while the managed session remains.
+	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "o")
+	waitFor(t, 2*time.Second, "popup activation handoff", func() bool {
+		return !strings.Contains(mustTmux(t, "list-windows", "-t", "origin", "-F", "#{window_name}"), windowName)
+	})
 }
 
 func addManagedTestSession(t *testing.T, name, agentName, path string, state types.State) string {

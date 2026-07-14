@@ -106,22 +106,23 @@ func AttachCommand(name string, clearTmuxEnv bool) string {
 type ClientInfo struct {
 	Client  string
 	Session string
+	Window  string
 }
 
 // ListClients returns the list of attached clients.
 func ListClients() []ClientInfo {
-	result := RunRaw([]string{"list-clients", "-F", "#{client_name} #{session_name}"})
+	result := RunRaw([]string{"list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_name}"})
 	if result.ExitCode != 0 || result.Stdout == "" {
 		return nil
 	}
 	lines := strings.Split(result.Stdout, "\n")
 	clients := make([]ClientInfo, 0, len(lines))
 	for _, line := range lines {
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		clients = append(clients, ClientInfo{Client: parts[0], Session: parts[1]})
+		clients = append(clients, ClientInfo{Client: parts[0], Session: parts[1], Window: parts[2]})
 	}
 	return clients
 }

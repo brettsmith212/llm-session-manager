@@ -106,5 +106,5 @@ func BadgeColor(name string) ansi.RGB {
 // ErrNotConfigured is returned by callers that need an agent command and
 // find neither @llm_active_agent nor @llm_command set.
 func ErrNotConfigured() error {
-	return fmt.Errorf("no agent configured; set @llm_command in tmux.conf (e.g. set -g @llm_command \"opencode\") or toggle with `s` in the picker")
+	return fmt.Errorf("no agent configured; set @llm_command in tmux.conf (e.g. set -g @llm_command \"opencode\") or toggle with `s` in the control room")
 }

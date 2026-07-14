@@ -219,7 +219,7 @@ func (p *picker) render() {
 		}
 	}
 
-	header := fmt.Sprintf(" %s%s◆ Sessions%s  %s%d/%d%s",
+	header := fmt.Sprintf(" %s%s◆ Agents%s  %s%d/%d%s",
 		ansi.Foreground(ansi.Blue), ansi.Bold, ansi.Reset,
 		ansi.Foreground(ansi.Overlay2), position, len(list), ansi.Reset)
 	if waiting > 0 {
@@ -248,7 +248,8 @@ func (p *picker) render() {
 			ansi.Foreground(ansi.Text), p.query, ansi.Reset,
 			ansi.Foreground(ansi.Overlay0), ansi.Reset))
 	} else {
-		frame.line(2, fmt.Sprintf("  %s↑↓%s %snavigate · %s⏎%s %sopen · %s/%s %sfilter%s",
+		frame.line(2, fmt.Sprintf("  %s↑↓%s %snav · %s⏎%s %slive · %so/⇧⏎%s %spopup · %s/%s %sfind%s",
+			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0),
 			ansi.Foreground(ansi.Surface2), ansi.Reset, ansi.Foreground(ansi.Overlay0), ansi.Reset))
@@ -603,12 +604,24 @@ func (p *picker) updatePreview(session types.Session) {
 	if !updated {
 		return
 	}
-	// Refresh the preview pane title with the live name + window index so
-	// the "▶ Preview · …" border label always tracks what is shown there.
+	// Refresh the live pane title with the name + window index so its border
+	// always tracks what is shown there and advertises the outer-tmux escape.
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
-		fmt.Sprintf("▶ Preview · %s · %s #%d", projectName(session), session.WindowName, session.WindowIndex),
+		fmt.Sprintf("▶ Live · %s · %s #%d · prefix u returns", projectName(session), session.WindowName, session.WindowIndex),
 		"-t", ":" + windowName + ".1"})
 	p.previewWindowID = session.WindowID
+}
+
+func (p *picker) focusPreview() {
+	list := p.filtered()
+	if p.selectedIndex >= len(list) {
+		return
+	}
+	// Navigation updates are debounced, so flush the final selection before
+	// handing input to the live pane. Otherwise a quick j+Enter could focus the
+	// previously selected agent for a fraction of a second.
+	p.flushPreview()
+	_ = tmux.RunRaw([]string{"select-pane", "-t", ":" + windowName + ".1"})
 }
 
 func (p *picker) changeSelection(delta int) {
@@ -719,6 +732,7 @@ func (p *picker) activateSession() bool {
 
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
+	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
 
 	origin := session.Origin
 	if origin == "" {
@@ -728,7 +742,7 @@ func (p *picker) activateSession() bool {
 		origin = tmux.GetParentSession()
 	}
 	if origin != "" && origin != session.Name {
-		if err := tmux.EnsureOriginWindow(origin, session.Path, p.parent); err != nil {
+		if err := tmux.EnsureOriginWindow(origin, session.Path, parent); err != nil {
 			// Don't fall through to opening the popup / killing the picker
 			// window on a half-completed switch — that's what leaves the
 			// popup stacked on whatever window the client happened to be on
@@ -739,10 +753,10 @@ func (p *picker) activateSession() bool {
 		}
 	}
 
-	if p.parent != "" {
+	if parent != "" {
 		attachCmd := tmux.AttachCommand(session.Name, false) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
 		cmd := exec.Command("tmux", "display-popup",
-			"-c", p.parent,
+			"-c", parent,
 			"-w", width,
 			"-h", height,
 			"-E",
@@ -849,6 +863,8 @@ func (p *picker) handleKeys(data string) (done bool) {
 		case "\x1b[B", "j":
 			p.changeSelection(1)
 		case "\r":
+			p.focusPreview()
+		case "o", "\x1b[13;2u", "\x1b[27;2;13~":
 			if p.activateSession() {
 				return true
 			}

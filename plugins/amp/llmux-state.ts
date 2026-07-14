@@ -1,6 +1,6 @@
 /**
- * Keep llmux's tmux state in sync with Amp and expose the llmux picker in
- * Amp's command palette.
+ * Keep llmux's tmux state in sync with Amp and expose the llmux control room
+ * in Amp's command palette.
  */
 import type { PluginAPI, ThreadID, ThreadState } from '@ampcode/plugin'
 
@@ -67,9 +67,9 @@ export default function (amp: PluginAPI) {
   amp.registerCommand(
     'llmux-open-picker',
     {
-      title: 'Open session picker',
+      title: 'Open agent control room',
       category: 'llmux',
-      description: 'Switch to another managed LLM session in tmux.',
+      description: 'Monitor and switch managed LLM sessions in tmux.',
       availability: process.env.TMUX_PANE
         ? { type: 'enabled' }
         : { type: 'disabled', reason: 'Amp is not running inside tmux' },
@@ -78,8 +78,8 @@ export default function (amp: PluginAPI) {
       try {
         await ctx.$`llmux list`
       } catch (error) {
-        amp.logger.log('Unable to open llmux picker:', error)
-        await ctx.ui.notify('Could not open the llmux session picker.')
+        amp.logger.log('Unable to open llmux control room:', error)
+        await ctx.ui.notify('Could not open the llmux agent control room.')
       }
     },
   )

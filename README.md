@@ -41,7 +41,7 @@ xdg.configFile."amp/plugins/llmux-state.ts".source =
 ```
 
 The plugin reports Amp's `working`, `waiting`, and `idle` states to llmux. It
-also adds **llmux: Open session picker** to Amp's command palette (`Ctrl+O`).
+also adds **llmux: Open agent control room** to Amp's command palette (`Ctrl+O`).
 
 Without Nix, copy `plugins/amp/llmux-state.ts` to
 `~/.config/amp/plugins/llmux-state.ts`, then run **plugins: reload** in Amp.
@@ -67,7 +67,7 @@ nix build .#opencode-plugin # the OpenCode plugin
 ```bash
 llmux launch <cwd> <window_id>   # create a session for a new agent
 llmux warm <cwd>                 # pre-warm a session in the background (hidden from picker)
-llmux list                         # list sessions (used by the picker)
+llmux list                         # open the agent control room
 llmux state <working|waiting|idle> # update session state from a hook
 ```
 
@@ -102,14 +102,29 @@ set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
 `llmux` also maintains the numeric `@llm_waiting_count` option for custom
 status formats. Both values update whenever an agent reports a state change.
 
+### Control room
+
+Open the control room with `Ctrl+a u`. The left pane manages sessions while
+the right pane is the selected agent's live terminal:
+
+- `Enter` moves into the live agent without closing the control room.
+- `Ctrl+a u` returns from the live agent to the session list.
+- `o` opens the selected agent in the full popup over its project window.
+- `Shift+Enter` also opens the popup when the terminal and tmux modified-key
+  configuration distinguish it from Enter; `o` is the portable binding.
+- `a` creates another session and returns to the control room with it selected.
+
+The popup handoff preserves the project-parent workflow: closing the popup
+returns to the matching project window for Neovim, diff review, and shell work.
+
 ### Switching agents
 
-Open the picker (`Ctrl+a u`) and press `s` to cycle the active agent. The
-current choice is shown in the picker header — `agent: opencode ▾`,
+Open the control room (`Ctrl+a u`) and press `s` to cycle the active agent. The
+current choice is shown in the header — `agent: opencode ▾`,
 color-coded to match the per-row badge. Only **new** sessions pick up the
 change: existing sessions keep running whatever agent they booted with, so
 you can have opencode sessions and a fresh claude session side by side in
-the picker. The override lives in `@llm_active_agent`, a runtime tmux
+the control room. The override lives in `@llm_active_agent`, a runtime tmux
 option, so a fresh tmux server silently reverts to `@llm_command`.
 
 ### Pre-warming

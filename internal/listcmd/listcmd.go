@@ -14,14 +14,38 @@ import (
 
 const windowName = "llm-picker"
 
-// ListCommand builds the tmux picker window. clientName, when non-empty, is
-// the tmux client that invoked the command (typically "#{client_name}"
-// expanded by the calling key binding) and is used as the host client
-// instead of guessing from the server-wide client list — guessing breaks
-// down as soon as more than one non-managed client is attached anywhere on
-// the tmux server.
+// ListCommand builds or focuses the tmux control-room window. clientName,
+// when non-empty, is the tmux client that invoked the command (typically
+// "#{client_name}" expanded by the calling key binding) and is used as the
+// host client instead of guessing from the server-wide client list — guessing
+// breaks down as soon as more than one non-managed client is attached anywhere
+// on the tmux server.
 func ListCommand(clientName string) error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
+	host := resolveHost(prefix, clientName)
+
+	// A live pane is a nested tmux client whose TTY is the pane TTY of an
+	// existing control room. Return through that outer client rather than
+	// treating the managed session as the place where a new room belongs.
+	if roomHost := containingControlRoom(host); roomHost != nil {
+		// Selecting the outer list reroutes physical input without detaching the
+		// nested client, so the agent remains live and visible in the right pane.
+		if focusExistingControlRoom(roomHost) {
+			_ = tmux.SetGlobalOption("@llm_parent", roomHost.Client)
+			return nil
+		}
+		host = roomHost
+	}
+
+	// Reuse a healthy room in the invoking client's session whether it is
+	// currently visible or in the background. This makes Ctrl+a u both the
+	// entry point from a project window and the escape hatch from the live pane.
+	if host != nil {
+		_ = tmux.SetGlobalOption("@llm_parent", host.Client)
+		if focusExistingControlRoom(host) {
+			return nil
+		}
+	}
 
 	// Detach any nested managed session so the picker isn't nested inside one.
 	nested := getNestedSession(prefix)
@@ -35,7 +59,9 @@ func ListCommand(clientName string) error {
 		}
 	}
 
-	host := resolveHost(prefix, clientName)
+	// clientName may have named the nested client that was just detached. Resolve
+	// again so the host is the surviving outer project/control-room client.
+	host = resolveHost(prefix, clientName)
 	if host != nil {
 		_ = tmux.SetGlobalOption("@llm_parent", host.Client)
 	} else {
@@ -53,6 +79,9 @@ func ListCommand(clientName string) error {
 	pickerTarget := windowName
 	if ts != "" {
 		pickerTarget = ts + ":" + windowName
+	}
+	if focusExistingControlRoom(host) {
+		return nil
 	}
 
 	_ = tmux.RunRaw([]string{"kill-window", "-t", pickerTarget})
@@ -81,7 +110,7 @@ func ListCommand(clientName string) error {
 		return fmt.Errorf("split-window failed: %w", err)
 	}
 
-	// ── A: pane borders + titles so picker (left) and preview (right) are
+	// ── A: pane borders + titles so control room (left) and live agent (right) are
 	// visually distinct. Only the active pane gets a bright blue border; the
 	// inactive one stays muted. Each pane has its own title shown on top.
 	borderOpts := [][2]string{
@@ -94,8 +123,8 @@ func ListCommand(clientName string) error {
 	for _, o := range borderOpts {
 		_ = tmux.SetWindowOption(pickerTarget, o[0], o[1])
 	}
-	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".0", "-T", "◆ Sessions"})
-	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".1", "-T", "▶ Preview"})
+	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".0", "-T", "◆ Control Room"})
+	_ = tmux.RunRaw([]string{"select-pane", "-t", pickerTarget + ".1", "-T", "▶ Live · prefix u returns"})
 
 	if _, err := tmux.Run([]string{
 		"respawn-pane", "-k",
@@ -115,6 +144,70 @@ func ListCommand(clientName string) error {
 	}
 
 	return nil
+}
+
+func focusExistingControlRoom(host *tmux.ClientInfo) bool {
+	if host == nil || host.Session == "" {
+		return false
+	}
+	target := host.Session + ":" + windowName
+	result := tmux.RunRaw([]string{"list-panes", "-t", target, "-F", "#{pane_index}\t#{pane_dead}"})
+	if result.ExitCode != 0 {
+		return false
+	}
+	alive := make(map[string]bool, 2)
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 && parts[1] == "0" {
+			alive[parts[0]] = true
+		}
+	}
+	if !alive["0"] || !alive["1"] {
+		return false
+	}
+	if _, err := tmux.Run([]string{"select-pane", "-t", target + ".0"}); err != nil {
+		return false
+	}
+	_ = tmux.RunRaw([]string{"switch-client", "-c", host.Client, "-t", target})
+	return true
+}
+
+// containingControlRoom returns the outer client displaying the control room
+// whose live pane owns the invoking nested client's TTY.
+func containingControlRoom(nested *tmux.ClientInfo) *tmux.ClientInfo {
+	if nested == nil || nested.Client == "" {
+		return nil
+	}
+	result := tmux.RunRaw([]string{"list-panes", "-a", "-F",
+		"#{session_name}\t#{window_name}\t#{pane_index}\t#{pane_tty}"})
+	if result.ExitCode != 0 {
+		return nil
+	}
+	roomSession := ""
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) == 4 && parts[1] == windowName && parts[2] == "1" && parts[3] == nested.Client {
+			roomSession = parts[0]
+			break
+		}
+	}
+	if roomSession == "" {
+		return nil
+	}
+	preferred := tmux.GetGlobalOption("@llm_parent", "")
+	var fallback *tmux.ClientInfo
+	for _, client := range tmux.ListClients() {
+		if client.Session == roomSession && client.Window == windowName {
+			client := client
+			if client.Client == preferred {
+				return &client
+			}
+			if fallback == nil {
+				fallback = &client
+			}
+		}
+	}
+	return fallback
 }
 
 func getNestedSession(prefix string) string {
