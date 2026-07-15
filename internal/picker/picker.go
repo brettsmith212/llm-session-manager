@@ -526,6 +526,7 @@ func (p *picker) render() {
 		if row >= footerRow {
 			break
 		}
+		indent := strings.Repeat(" ", max(0, listRow.indent))
 		switch listRow.kind {
 		case listRowSection:
 			text := "  ── " + listRow.text + " "
@@ -534,17 +535,20 @@ func (p *picker) render() {
 			row++
 		case listRowSpacer:
 			row++
+		case listRowRepository:
+			frame.line(row, fmt.Sprintf("%s%s%s%s%s", indent, ansi.Foreground(ansi.Blue), ansi.Bold, listRow.text, ansi.Reset))
+			row++
 		case listRowProject:
-			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Blue), listRow.text, ansi.Reset))
+			frame.line(row, fmt.Sprintf("%s%s%s%s", indent, ansi.Foreground(listRow.color), listRow.text, ansi.Reset))
 			row++
 		case listRowGit:
-			frame.line(row, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Overlay0), listRow.text, ansi.Reset))
+			frame.line(row, fmt.Sprintf("%s%s%s%s", indent, ansi.Foreground(ansi.Overlay0), listRow.text, ansi.Reset))
 			row++
 		case listRowWarning:
-			frame.line(row, fmt.Sprintf("  %s⚠ %s%s", ansi.Foreground(ansi.Yellow), listRow.text, ansi.Reset))
+			frame.line(row, fmt.Sprintf("%s%s⚠ %s%s", indent, ansi.Foreground(ansi.Yellow), listRow.text, ansi.Reset))
 			row++
 		case listRowSession:
-			row = drawItem(frame, list[listRow.sessionIndex], cols, listRow.sessionIndex == p.selectedIndex, row, listRow.isLast)
+			row = drawItem(frame, list[listRow.sessionIndex], cols, listRow.sessionIndex == p.selectedIndex, row, listRow.isLast, listRow.indent)
 		}
 	}
 	frame.flush()
@@ -555,6 +559,7 @@ type listRowKind int
 const (
 	listRowSection listRowKind = iota
 	listRowSpacer
+	listRowRepository
 	listRowProject
 	listRowGit
 	listRowWarning
@@ -567,6 +572,7 @@ type pickerListRow struct {
 	color        ansi.RGB
 	sessionIndex int
 	isLast       bool
+	indent       int
 }
 
 func (p *picker) buildListRows(list []types.Session) []pickerListRow {
@@ -580,6 +586,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 	activity := p.pathActivity()
 	rows := make([]pickerListRow, 0, len(list)*2)
 	previousRank := -1
+	previousFamily := ""
 	previousProject := ""
 	for i, session := range list {
 		rank := stateRank(sessionState(session))
@@ -598,6 +605,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			}
 			rows = append(rows, pickerListRow{kind: listRowSection, text: fmt.Sprintf("%s · %d", name, stateCounts[rank]), color: color})
 			previousRank = rank
+			previousFamily = ""
 			previousProject = ""
 		}
 
@@ -605,16 +613,46 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 		if projectKey == "" {
 			projectKey = session.Name
 		}
+		info := p.gitByPath[projectKey]
+		familyKey := projectKey
+		nestedCheckout := info.valid && info.commonDir != ""
+		if nestedCheckout {
+			familyKey = strings.ToLower(filepath.Clean(info.commonDir))
+		}
+		if familyKey != previousFamily {
+			if nestedCheckout {
+				rows = append(rows, pickerListRow{
+					kind:   listRowRepository,
+					text:   repositoryHeading(info, session),
+					indent: 2,
+				})
+			}
+			previousFamily = familyKey
+			previousProject = ""
+		}
+
+		projectIndent := 2
+		detailIndent := 2
+		projectColor := ansi.Blue
+		if nestedCheckout {
+			projectIndent = 4
+			detailIndent = 6
+			projectColor = ansi.Subtext0
+		}
 		if projectKey != previousProject {
 			path := sessions.FormatPath(session.Path)
 			if path == "" {
 				path = session.Name
 			}
-			if info := p.gitByPath[projectKey]; info.managedWorktree {
-				path = fmt.Sprintf("%s · isolated/%s", info.repository, filepath.Base(session.Path))
+			if nestedCheckout {
+				path = "primary checkout"
+				if info.linkedWorktree {
+					projectColor = ansi.Mauve
+					path = "↳ worktree · " + worktreeHeading(info, session)
+				}
 			}
-			rows = append(rows, pickerListRow{kind: listRowProject, text: path})
-			metadata := formatGitInfo(p.gitByPath[projectKey])
+			rows = append(rows, pickerListRow{kind: listRowProject, text: path, color: projectColor, indent: projectIndent})
+			metadata := formatGitInfo(info)
 			if shared := activity[projectKey]; shared.total > 1 {
 				sharedText := fmt.Sprintf("shared checkout · %d agents", shared.total)
 				if metadata == "" {
@@ -624,10 +662,10 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 				}
 			}
 			if metadata != "" {
-				rows = append(rows, pickerListRow{kind: listRowGit, text: metadata})
+				rows = append(rows, pickerListRow{kind: listRowGit, text: metadata, indent: detailIndent})
 			}
 			if shared := activity[projectKey]; rank == stateRank(types.Working) && shared.working > 1 {
-				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents are active in this checkout", shared.working)})
+				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents are active in this checkout", shared.working), indent: detailIndent})
 			}
 			previousProject = projectKey
 		}
@@ -641,9 +679,35 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			}
 			nextSameProject = stateRank(sessionState(next)) == rank && nextKey == projectKey
 		}
-		rows = append(rows, pickerListRow{kind: listRowSession, sessionIndex: i, isLast: !nextSameProject})
+		rows = append(rows, pickerListRow{kind: listRowSession, sessionIndex: i, isLast: !nextSameProject, indent: detailIndent})
 	}
 	return rows
+}
+
+func repositoryHeading(info gitInfo, session types.Session) string {
+	if filepath.Base(info.commonDir) == ".git" {
+		return sessions.FormatPath(filepath.Dir(info.commonDir))
+	}
+	if info.repository != "" {
+		return info.repository
+	}
+	if info.checkoutPath != "" {
+		return sessions.FormatPath(info.checkoutPath)
+	}
+	return sessions.FormatPath(session.Path)
+}
+
+func worktreeHeading(info gitInfo, session types.Session) string {
+	if info.worktreeLabel != "" {
+		return info.worktreeLabel
+	}
+	if info.checkoutPath != "" {
+		return filepath.Base(info.checkoutPath)
+	}
+	if info.branch != "" {
+		return info.branch
+	}
+	return filepath.Base(session.Path)
 }
 
 func visibleListRows(rows []pickerListRow, selected, maxRows int) []pickerListRow {
@@ -663,7 +727,7 @@ func visibleListRows(rows []pickerListRow, selected, maxRows int) []pickerListRo
 	return rows[start:end]
 }
 
-func drawItem(frame *screenFrame, session types.Session, cols int, selected bool, row int, isLastInGroup bool) int {
+func drawItem(frame *screenFrame, session types.Session, cols int, selected bool, row int, isLastInGroup bool, indent int) int {
 	state := sessionState(session)
 	stateSymbol, stateLabel, stateColor := statePresentation(state)
 	ago := sessions.FormatAgo(session.StateAt)
@@ -682,7 +746,7 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 	}
 
 	statePadded := fmt.Sprintf("%-9s", stateLabel)
-	const prefixWidth = 17 // indent + connector + symbol + padded state + separator
+	prefixWidth := indent + 15 // indent + connector + symbol + padded state + separator
 	agentWidth := min(16, max(0, cols-prefixWidth-utf8.RuneCountInString(windowNumber)-2))
 	agentName = truncateVisible(agentName, "", "", agentWidth)
 	badge := ""
@@ -725,7 +789,7 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 			detailColor = muted
 		}
 
-		line1 := "  " +
+		line1 := strings.Repeat(" ", indent) +
 			accent + connector + " " +
 			dot + stateSymbol + " " + txt + statePadded + " " +
 			detailColor + detail + muted + padding + separator +
@@ -738,7 +802,7 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 		txt := ansi.Foreground(ansi.Subtext0)
 		muted := ansi.Foreground(ansi.Overlay0)
 
-		line1 := "  " +
+		line1 := strings.Repeat(" ", indent) +
 			tree + connector + ansi.Reset + " " +
 			dot + stateSymbol + " " + txt + statePadded + " " + ansi.Reset +
 			txt + detail + muted + padding + separator + ansi.Reset +
@@ -1628,7 +1692,8 @@ func (p *picker) openCreatePopup() {
 
 func (p *picker) openWorktreeCreatePopup() {
 	defaultPath := p.createDefaultPath()
-	if _, err := worktree.Inspect(defaultPath); err != nil {
+	worktreeBase := tmux.GetGlobalOption(worktree.TmuxBaseOption, "")
+	if _, err := worktree.Inspect(defaultPath, worktreeBase); err != nil {
 		p.notice = err.Error()
 		p.noticeError = true
 		p.render()

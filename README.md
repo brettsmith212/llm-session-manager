@@ -92,6 +92,7 @@ sessions know which agent to launch.
 | `@llm_popup_width` | `90%` | Width of the popup opened by `launch`/`add`. Any tmux size spec. |
 | `@llm_popup_height` | `90%` | Height of the popup opened by `launch`/`add`. |
 | `@llm_warm_cap` | `5` | Max number of warm-only background sessions. `0` = unlimited. Oldest evicted LRU-style. |
+| `@llm_worktree_base` | XDG data home (`~/.local/share`) | Parent directory for new isolated checkouts. llmux appends `llmux/worktrees/<repository>-<hash>/<task>`. Existing worktrees are unaffected. |
 | `@llm_parent` | *(unset)* | Target tmux client for popup anchoring. Set automatically by the tmux binding; usually not set manually. |
 
 A minimal `tmux.conf` block:
@@ -99,6 +100,10 @@ A minimal `tmux.conf` block:
 ```tmux
 set -g @llm_command 'opencode'
 set -g @llm_agents 'opencode claude amp'
+
+# Optional: place new isolated checkouts under
+# ~/Developer/llmux/worktrees/<repository>-<hash>/<task>/
+set -g @llm_worktree_base '~/Developer'
 
 # Optional ambient indicator; llmux keeps @llm_status updated and leaves it
 # empty when no sessions need attention.
@@ -139,12 +144,14 @@ the right pane is the selected agent's live terminal:
 Sessions are grouped into **Needs You**, **Active**, and **Idle** sections, then
 by project. Checkouts from the same Git repository sort together within each
 section, with the primary checkout first and its worktrees ordered by task or
-branch beneath it. Git repositories show their local branch and compact
-working-tree summary (`main · 3 files · +24 · -6 · ?1`). Clean repositories
-show `main · clean`; non-Git or unavailable directories omit that line. Git
-reads are local, cached, and never fetch from a remote. Multiple agents in the
-same working directory appear as muted `shared checkout` metadata; this
-becomes a yellow warning only when more than one of them is actively working.
+branch beneath it. The repository, its primary checkout, and worktrees are
+rendered as an indented hierarchy rather than unrelated paths. Git repositories
+show their local branch and compact working-tree summary
+(`main · 3 files · +24 · -6 · ?1`). Clean repositories show `main · clean`;
+non-Git or unavailable directories omit that line. Git reads are local, cached,
+and never fetch from a remote. Multiple agents in the same working directory
+appear as muted `shared checkout` metadata; this becomes a yellow warning only
+when more than one of them is actively working.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.
@@ -153,12 +160,31 @@ it.
 
 ### Isolated worktree agents
 
-Uppercase `A` is an additive alternative to the ordinary `a` flow. It creates
-a task branch and checkout beneath the XDG data directory:
+Uppercase `A` is an additive alternative to the ordinary `a` flow. By default,
+it creates a task branch and checkout beneath the XDG data directory:
 
 ```text
 ~/.local/share/llmux/worktrees/<repository>-<hash>/<task>/
 ```
+
+Set `@llm_worktree_base` to move new checkouts to another disk or directory.
+The value is a base directory—not the final worktree root—so this Linux-friendly
+tmux configuration:
+
+```tmux
+set -g @llm_worktree_base '~/Developer'
+```
+
+produces:
+
+```text
+~/Developer/llmux/worktrees/<repository>-<hash>/<task>/
+```
+
+Relative values are resolved beneath the home directory, and `~` is expanded
+by llmux. Existing worktrees keep their recorded locations. Ownership manifests
+remain in the XDG data directory so `llmux worktree list` and cleanup continue
+to find checkouts across old and customized roots.
 
 For example, an isolated `Try Nixvim Upgrade` task selected from
 `~/.config/nix-config` gets a branch such as

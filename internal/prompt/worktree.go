@@ -18,7 +18,8 @@ import (
 // RunWorktree creates an isolated Git worktree and starts one agent there.
 // It is invoked inside a tmux popup from the Control Room.
 func RunWorktree(defaultPath, origin string) error {
-	repository, err := worktree.Inspect(defaultPath)
+	worktreeBase := tmux.GetGlobalOption(worktree.TmuxBaseOption, "")
+	repository, err := worktree.Inspect(defaultPath, worktreeBase)
 	if err != nil {
 		return err
 	}

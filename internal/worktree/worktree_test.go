@@ -15,7 +15,7 @@ func TestCreateIsolatesChangesAndSafeRemoveKeepsBranch(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	repository := createTestRepository(t)
 
-	info, err := Inspect(repository)
+	info, err := Inspect(repository, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,8 +23,8 @@ func TestCreateIsolatesChangesAndSafeRemoveKeepsBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(plan.Path, WorktreeRoot()+string(filepath.Separator)) {
-		t.Fatalf("worktree path %q is not under %q", plan.Path, WorktreeRoot())
+	if !strings.HasPrefix(plan.Path, WorktreeRoot("")+string(filepath.Separator)) {
+		t.Fatalf("worktree path %q is not under %q", plan.Path, WorktreeRoot(""))
 	}
 	if plan.Branch != "llmux/try-nixvim-upgrade" {
 		t.Fatalf("branch = %q", plan.Branch)
@@ -77,7 +77,8 @@ func TestCreateStartsFromCommittedHeadAndAvoidsCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := Inspect(repository)
+	worktreeBase := t.TempDir()
+	info, err := Inspect(repository, worktreeBase)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +88,9 @@ func TestCreateStartsFromCommittedHeadAndAvoidsCollisions(t *testing.T) {
 	first, err := NewPlan(info, "Darwin Settings")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first.Path, WorktreeRoot(worktreeBase)+string(filepath.Separator)) {
+		t.Fatalf("custom worktree path %q is not under %q", first.Path, WorktreeRoot(worktreeBase))
 	}
 	if err := Create(first); err != nil {
 		t.Fatal(err)
@@ -111,7 +115,7 @@ func TestRemovePrunesManifestForMissingWorktree(t *testing.T) {
 	}
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	repository := createTestRepository(t)
-	info, err := Inspect(repository)
+	info, err := Inspect(repository, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +159,23 @@ func TestSlug(t *testing.T) {
 		if got := Slug(input); got != want {
 			t.Errorf("Slug(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestWorktreeRootUsesOptionalBaseDirectory(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	if got, want := WorktreeRoot(""), filepath.Join(dataHome, "llmux", "worktrees"); got != want {
+		t.Fatalf("default worktree root = %q, want %q", got, want)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := WorktreeRoot("~/Developer"), filepath.Join(home, "Developer", "llmux", "worktrees"); got != want {
+		t.Fatalf("configured worktree root = %q, want %q", got, want)
+	}
+	if got, want := WorktreeRoot("Developer"), filepath.Join(home, "Developer", "llmux", "worktrees"); got != want {
+		t.Fatalf("home-relative worktree root = %q, want %q", got, want)
 	}
 }
 

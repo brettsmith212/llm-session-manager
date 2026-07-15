@@ -241,6 +241,50 @@ func TestRepositoryMetadataReorderPreservesSelectedWindow(t *testing.T) {
 	}
 }
 
+func TestListRowsShowRepositoryCheckoutHierarchy(t *testing.T) {
+	const (
+		original  = "/projects/repository"
+		worktree  = "/worktrees/repository/try-it"
+		commonDir = original + "/.git"
+	)
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "original", WindowID: "@1", Path: original, State: types.Working},
+			{Name: "original-two", WindowID: "@3", Path: original},
+			{Name: "worktree", WindowID: "@2", Path: worktree, State: types.Working},
+		},
+		gitByPath: map[string]gitInfo{
+			gitPathKey(original): {valid: true, branch: "main", commonDir: commonDir, checkoutPath: original},
+			gitPathKey(worktree): {valid: true, branch: "llmux/try-it", commonDir: commonDir, checkoutPath: worktree, linkedWorktree: true, worktreeLabel: "Try It"},
+		},
+	}
+
+	rows := p.buildListRows(p.filtered())
+	want := []struct {
+		kind   listRowKind
+		text   string
+		indent int
+	}{
+		{listRowSection, "ACTIVE · 3", 0},
+		{listRowRepository, original, 2},
+		{listRowProject, "primary checkout", 4},
+		{listRowGit, "main · clean · shared checkout · 2 agents", 6},
+		{listRowSession, "", 6},
+		{listRowSession, "", 6},
+		{listRowProject, "↳ worktree · Try It", 4},
+		{listRowGit, "llmux/try-it · clean", 6},
+		{listRowSession, "", 6},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("hierarchy rows = %#v, want %d rows", rows, len(want))
+	}
+	for i, expected := range want {
+		if rows[i].kind != expected.kind || rows[i].text != expected.text || rows[i].indent != expected.indent {
+			t.Fatalf("hierarchy row %d = %#v, want %#v", i, rows[i], expected)
+		}
+	}
+}
+
 func TestFrozenDisplayStateDoesNotDriftBetweenRefreshes(t *testing.T) {
 	session := types.Session{
 		State: types.Working, DisplayState: types.Idle,
@@ -330,7 +374,7 @@ func TestSelectedRowHighlightContinuesBehindWindowNumber(t *testing.T) {
 		WindowName:  "claude",
 		State:       types.Idle,
 		Path:        "/work/api",
-	}, 80, true, 1, true)
+	}, 80, true, 1, true, 2)
 
 	output := captureStdout(t, frame.flush)
 	marker := strings.LastIndex(output, "#0")
@@ -496,7 +540,7 @@ func TestCleanupSelectedWorktreeStopsAgentsAndKeepsBranch(t *testing.T) {
 	}
 	mustGit(t, repository, "add", "flake.nix")
 	mustGit(t, repository, "commit", "-qm", "initial")
-	repoInfo, err := worktree.Inspect(repository)
+	repoInfo, err := worktree.Inspect(repository, "")
 	if err != nil {
 		t.Fatal(err)
 	}

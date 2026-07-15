@@ -39,7 +39,7 @@ func TestSubmitWorktreeCreatesLabeledManagedAgent(t *testing.T) {
 	}
 	gitTest(t, repository, "add", "flake.nix")
 	gitTest(t, repository, "commit", "-qm", "initial")
-	repoInfo, err := worktree.Inspect(repository)
+	repoInfo, err := worktree.Inspect(repository, "")
 	if err != nil {
 		t.Fatal(err)
 	}

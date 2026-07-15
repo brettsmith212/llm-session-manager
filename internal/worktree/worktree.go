@@ -16,6 +16,9 @@ import (
 
 const manifestVersion = 1
 
+// TmuxBaseOption configures the parent directory used for new worktrees.
+const TmuxBaseOption = "@llm_worktree_base"
+
 // Repository describes the Git checkout used as the source for a new
 // isolated worktree.
 type Repository struct {
@@ -52,8 +55,9 @@ type Manifest struct {
 
 // Inspect resolves the repository and committed base represented by path.
 // Uncommitted source-checkout changes are reported but intentionally excluded
-// from worktree creation.
-func Inspect(path string) (Repository, error) {
+// from worktree creation. worktreeBase is the optional user-configured parent
+// beneath which llmux/worktrees is created.
+func Inspect(path, worktreeBase string) (Repository, error) {
 	checkout, err := gitOutputAt(path, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return Repository{}, fmt.Errorf("not a Git working tree: %s", path)
@@ -99,7 +103,7 @@ func Inspect(path string) (Repository, error) {
 	if filepath.Base(commonDir) != ".git" || name == "." || name == string(filepath.Separator) {
 		name = filepath.Base(checkout)
 	}
-	storageDir := filepath.Join(WorktreeRoot(), repoStorageName(name, commonDir))
+	storageDir := filepath.Join(WorktreeRoot(worktreeBase), repoStorageName(name, commonDir))
 	return Repository{
 		CheckoutPath: checkout,
 		CommonDir:    commonDir,
@@ -349,10 +353,24 @@ func List() ([]Manifest, error) {
 	return manifests, nil
 }
 
-// WorktreeRoot is the centralized checkout root. XDG_DATA_HOME is honored so
-// tests and non-default XDG layouts remain isolated.
-func WorktreeRoot() string {
-	return filepath.Join(dataHome(), "llmux", "worktrees")
+// WorktreeRoot is the centralized checkout root. When baseDir is empty,
+// XDG_DATA_HOME is honored. A configured base is expanded relative to the
+// user's home, then llmux/worktrees is appended consistently.
+func WorktreeRoot(baseDir string) string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		baseDir = dataHome()
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		switch {
+		case baseDir == "~":
+			baseDir = home
+		case strings.HasPrefix(baseDir, "~/"):
+			baseDir = filepath.Join(home, strings.TrimPrefix(baseDir, "~/"))
+		case !filepath.IsAbs(baseDir):
+			baseDir = filepath.Join(home, baseDir)
+		}
+	}
+	return filepath.Join(filepath.Clean(baseDir), "llmux", "worktrees")
 }
 
 // Slug converts a task label into a conservative branch/path component.
