@@ -19,7 +19,7 @@ func TestCreateIsolatesChangesAndSafeRemoveKeepsBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := NewPlan(info, "Try Nixvim Upgrade")
+	plan, err := NewPlan(info, "Try Nixvim Upgrade", DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestCreateStartsFromCommittedHeadAndAvoidsCollisions(t *testing.T) {
 	if !info.Dirty {
 		t.Fatal("dirty source checkout was not reported")
 	}
-	first, err := NewPlan(info, "Darwin Settings")
+	first, err := NewPlan(info, "Darwin Settings", DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,12 +100,43 @@ func TestCreateStartsFromCommittedHeadAndAvoidsCollisions(t *testing.T) {
 		t.Fatalf("worktree included source checkout changes: %q", got)
 	}
 
-	second, err := NewPlan(info, "Darwin Settings")
+	second, err := NewPlan(info, "Darwin Settings", DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second.Slug != "darwin-settings-2" || second.Branch != "llmux/darwin-settings-2" {
 		t.Fatalf("collision plan = %#v", second)
+	}
+}
+
+func TestNewPlanUsesConfiguredBranchPrefix(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	info, err := Inspect(createTestRepository(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	custom, err := NewPlan(info, "Patch One", "brett")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custom.Branch != "brett/patch-one" {
+		t.Fatalf("custom branch = %q", custom.Branch)
+	}
+
+	unprefixed, err := NewPlan(info, "Patch One", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unprefixed.Branch != "patch-one" {
+		t.Fatalf("unprefixed branch = %q", unprefixed.Branch)
+	}
+
+	if _, err := NewPlan(info, "Patch One", "invalid prefix"); err == nil || !strings.Contains(err.Error(), "invalid worktree branch prefix") {
+		t.Fatalf("invalid prefix error = %v", err)
 	}
 }
 
@@ -119,7 +150,7 @@ func TestRemovePrunesManifestForMissingWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := NewPlan(info, "Missing Checkout")
+	plan, err := NewPlan(info, "Missing Checkout", DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,12 @@ const manifestVersion = 1
 // TmuxBaseOption configures the parent directory used for new worktrees.
 const TmuxBaseOption = "@llm_worktree_base"
 
+// TmuxBranchPrefixOption configures the namespace used for new worktree branches.
+const TmuxBranchPrefixOption = "@llm_worktree_branch_prefix"
+
+// DefaultBranchPrefix keeps llmux-created branches easy to identify.
+const DefaultBranchPrefix = "llmux"
+
 // Repository describes the Git checkout used as the source for a new
 // isolated worktree.
 type Repository struct {
@@ -115,8 +121,9 @@ func Inspect(path, worktreeBase string) (Repository, error) {
 	}, nil
 }
 
-// NewPlan builds a collision-free branch and destination for label.
-func NewPlan(repository Repository, label string) (Plan, error) {
+// NewPlan builds a collision-free branch and destination for label. Set
+// branchPrefix to "none" to create an unprefixed branch.
+func NewPlan(repository Repository, label, branchPrefix string) (Plan, error) {
 	label = strings.TrimSpace(label)
 	if label == "" {
 		return Plan{}, errors.New("enter a task name")
@@ -126,12 +133,15 @@ func NewPlan(repository Repository, label string) (Plan, error) {
 	}
 
 	baseSlug := Slug(label)
+	if _, err := gitOutputWithDir(repository.CommonDir, "check-ref-format", "--branch", BranchName(branchPrefix, baseSlug)); err != nil {
+		return Plan{}, fmt.Errorf("invalid worktree branch prefix %q: %w", branchPrefix, err)
+	}
 	for suffix := 1; suffix < 10_000; suffix++ {
 		slug := baseSlug
 		if suffix > 1 {
 			slug = fmt.Sprintf("%s-%d", baseSlug, suffix)
 		}
-		branch := "llmux/" + slug
+		branch := BranchName(branchPrefix, slug)
 		path := filepath.Join(repository.StorageDir, slug)
 		if pathExists(path) || manifestExists(path) || branchExists(repository.CommonDir, branch) {
 			continue
@@ -145,6 +155,18 @@ func NewPlan(repository Repository, label string) (Plan, error) {
 		}, nil
 	}
 	return Plan{}, errors.New("couldn't find an available worktree name")
+}
+
+// BranchName applies the configured namespace to a worktree task slug.
+func BranchName(branchPrefix, slug string) string {
+	branchPrefix = strings.Trim(strings.TrimSpace(branchPrefix), "/")
+	if strings.EqualFold(branchPrefix, "none") {
+		return slug
+	}
+	if branchPrefix == "" {
+		branchPrefix = DefaultBranchPrefix
+	}
+	return branchPrefix + "/" + slug
 }
 
 // Create checks out the plan's base commit into its isolated directory and records

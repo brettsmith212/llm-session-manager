@@ -19,6 +19,7 @@ import (
 // It is invoked inside a tmux popup from the Control Room.
 func RunWorktree(defaultPath, origin string) error {
 	worktreeBase := tmux.GetGlobalOption(worktree.TmuxBaseOption, "")
+	branchPrefix := tmux.GetGlobalOption(worktree.TmuxBranchPrefixOption, worktree.DefaultBranchPrefix)
 	repository, err := worktree.Inspect(defaultPath, worktreeBase)
 	if err != nil {
 		return err
@@ -38,7 +39,7 @@ func RunWorktree(defaultPath, origin string) error {
 	defer fmt.Print(ansi.ShowCursor)
 
 	reader := bufio.NewReader(os.Stdin)
-	renderWorktreePrompt(repository, task, cursor, errMsg, creating)
+	renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
 	for {
 		keys, err := readKey(reader)
 		if err != nil {
@@ -52,14 +53,14 @@ func RunWorktree(defaultPath, origin string) error {
 		case keys == "\x1b" || code == 3: // bare esc or ctrl-c
 			return nil
 		case code == 13: // enter
-			plan, err := worktree.NewPlan(repository, task)
+			plan, err := worktree.NewPlan(repository, task, branchPrefix)
 			if err != nil {
 				errMsg = err.Error()
 				break
 			}
 			creating = true
 			errMsg = ""
-			renderWorktreePrompt(repository, task, cursor, errMsg, creating)
+			renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
 			if err := submitWorktree(plan, origin); err != nil {
 				creating = false
 				errMsg = err.Error()
@@ -98,11 +99,11 @@ func RunWorktree(defaultPath, origin string) error {
 			cursor += len(keys)
 			errMsg = ""
 		}
-		renderWorktreePrompt(repository, task, cursor, errMsg, creating)
+		renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
 	}
 }
 
-func renderWorktreePrompt(repository worktree.Repository, task string, cursor int, errMsg string, creating bool) {
+func renderWorktreePrompt(repository worktree.Repository, task, branchPrefix string, cursor int, errMsg string, creating bool) {
 	cols, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		cols = 80
@@ -128,8 +129,8 @@ func renderWorktreePrompt(repository worktree.Repository, task string, cursor in
 		slug = "<task>"
 	}
 	destination := filepath.Join(repository.StorageDir, slug)
-	writeLine(9, cols, fmt.Sprintf("  %sBranch:%s     llmux/%s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset, slug))
+	writeLine(9, cols, fmt.Sprintf("  %sBranch:%s     %s",
+		ansi.Foreground(ansi.Overlay0), ansi.Reset, worktree.BranchName(branchPrefix, slug)))
 	writeLine(10, cols, fmt.Sprintf("  %sCreates:%s    %s",
 		ansi.Foreground(ansi.Overlay0), ansi.Reset, shortenHome(destination)))
 

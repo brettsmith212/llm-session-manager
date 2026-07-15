@@ -93,6 +93,7 @@ sessions know which agent to launch.
 | `@llm_popup_height` | `90%` | Height of the popup opened by `launch`/`add`. |
 | `@llm_warm_cap` | `5` | Max number of warm-only background sessions. `0` = unlimited. Oldest evicted LRU-style. |
 | `@llm_worktree_base` | XDG data home (`~/.local/share`) | Parent directory for new isolated checkouts. llmux appends `llmux/worktrees/<repository>-<hash>/<task>`. Existing worktrees are unaffected. |
+| `@llm_worktree_branch_prefix` | `llmux` | Namespace for new worktree branches, such as `brett/patch-one`. Set to `none` for an unprefixed branch such as `patch-one`. |
 | `@llm_parent` | *(unset)* | Target tmux client for popup anchoring. Set automatically by the tmux binding; usually not set manually. |
 
 A minimal `tmux.conf` block:
@@ -104,6 +105,10 @@ set -g @llm_agents 'opencode claude amp'
 # Optional: place new isolated checkouts under
 # ~/Developer/llmux/worktrees/<repository>-<hash>/<task>/
 set -g @llm_worktree_base '~/Developer'
+
+# Optional: create brett/<task> branches instead of llmux/<task>.
+# Use 'none' if you want branches named only <task>.
+set -g @llm_worktree_branch_prefix 'brett'
 
 # Optional ambient indicator; llmux keeps @llm_status updated and leaves it
 # empty when no sessions need attention.
@@ -191,6 +196,17 @@ For example, an isolated `Try Nixvim Upgrade` task selected from
 `llmux/try-nixvim-upgrade` and a separate checkout under the directory above.
 The original `~/.config/nix-config` checkout is not moved or modified. Git
 objects and history remain shared with it.
+
+The `llmux/` branch namespace makes tool-created branches easy to identify, but
+it is configurable for personal or workplace conventions:
+
+```tmux
+set -g @llm_worktree_branch_prefix 'brett'
+```
+
+New branches then use names such as `brett/try-nixvim-upgrade`. Set the option
+to `none` to create `try-nixvim-upgrade` with no namespace. This only affects
+new worktrees; existing branches and checkouts are not renamed.
 
 The worktree starts from the selected checkout's committed `HEAD`.
 Uncommitted and untracked source-checkout changes are not copied; the creation

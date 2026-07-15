@@ -544,7 +544,7 @@ func TestCleanupSelectedWorktreeStopsAgentsAndKeepsBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := worktree.NewPlan(repoInfo, "Try Darwin Settings")
+	plan, err := worktree.NewPlan(repoInfo, "Try Darwin Settings", worktree.DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}

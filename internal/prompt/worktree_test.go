@@ -43,7 +43,7 @@ func TestSubmitWorktreeCreatesLabeledManagedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := worktree.NewPlan(repoInfo, "Test Nix Idea")
+	plan, err := worktree.NewPlan(repoInfo, "Test Nix Idea", worktree.DefaultBranchPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
