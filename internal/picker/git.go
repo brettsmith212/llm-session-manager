@@ -21,6 +21,10 @@ type gitInfo struct {
 	additions       int
 	deletions       int
 	untracked       int
+	checkoutPath    string
+	commonDir       string
+	linkedWorktree  bool
+	worktreeLabel   string
 	managedWorktree bool
 	repository      string
 }
@@ -64,9 +68,19 @@ func inspectGit(path string) gitInfo {
 	}
 
 	info := gitInfo{valid: true}
+	if identity, ok := runGit(path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"); ok {
+		parts := strings.Split(identity, "\n")
+		if len(parts) >= 3 {
+			info.checkoutPath = gitPathKey(strings.TrimSpace(parts[0]))
+			gitDir := gitPathKey(strings.TrimSpace(parts[1]))
+			info.commonDir = gitPathKey(strings.TrimSpace(parts[2]))
+			info.linkedWorktree = gitDir != "" && info.commonDir != "" && gitDir != info.commonDir
+		}
+	}
 	if manifest, err := worktree.Load(path); err == nil {
 		info.managedWorktree = true
 		info.repository = manifest.Repository
+		info.worktreeLabel = manifest.Label
 	}
 	oid := ""
 	for _, line := range strings.Split(status, "\n") {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,61 @@ func TestReplaceSessionsPreservesSelectedWindowAcrossStateReordering(t *testing.
 	}
 }
 
+func TestRepositorySortingKeepsPrimaryCheckoutBeforeItsWorktrees(t *testing.T) {
+	const (
+		commonDir = "/projects/zeta/.git"
+		original  = "/projects/zeta"
+		alphaTree = "/home/user/.local/share/llmux/worktrees/zeta/alpha"
+		betaTree  = "/home/user/.local/share/llmux/worktrees/zeta/beta"
+	)
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "beta", WindowID: "@3", Path: betaTree, State: types.Working},
+			{Name: "other", WindowID: "@0", Path: "/projects/alpha", State: types.Working},
+			{Name: "original", WindowID: "@1", Path: original, State: types.Working},
+			{Name: "alpha", WindowID: "@2", Path: alphaTree, State: types.Working},
+			{Name: "waiting-tree", WindowID: "@4", Path: alphaTree, State: types.Waiting},
+		},
+		gitByPath: map[string]gitInfo{
+			gitPathKey("/projects/alpha"): {valid: true, commonDir: "/projects/alpha/.git", checkoutPath: "/projects/alpha"},
+			gitPathKey(original):          {valid: true, commonDir: commonDir, checkoutPath: original},
+			gitPathKey(alphaTree):         {valid: true, commonDir: commonDir, checkoutPath: alphaTree, linkedWorktree: true, worktreeLabel: "Alpha task"},
+			gitPathKey(betaTree):          {valid: true, commonDir: commonDir, checkoutPath: betaTree, linkedWorktree: true, worktreeLabel: "Beta task"},
+		},
+	}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	want := []string{"@4", "@0", "@1", "@2", "@3"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("repository-aware order = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestRepositoryMetadataReorderPreservesSelectedWindow(t *testing.T) {
+	const (
+		original = "/z/repository"
+		worktree = "/a/worktree"
+	)
+	p := &picker{sessions: []types.Session{
+		{Name: "tree", WindowID: "@2", Path: worktree, State: types.Working},
+		{Name: "original", WindowID: "@1", Path: original, State: types.Working},
+	}}
+	p.selectedIndex = 0
+	selectedID := p.selectedWindowID()
+	p.gitByPath = map[string]gitInfo{
+		gitPathKey(original): {valid: true, commonDir: original + "/.git", checkoutPath: original},
+		gitPathKey(worktree): {valid: true, commonDir: original + "/.git", checkoutPath: worktree, linkedWorktree: true},
+	}
+	p.restoreSelectedWindow(selectedID)
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("selected window after repository reorder = %q, want @2", got)
+	}
+}
+
 func TestFrozenDisplayStateDoesNotDriftBetweenRefreshes(t *testing.T) {
 	session := types.Session{
 		State: types.Working, DisplayState: types.Idle,
@@ -233,8 +289,18 @@ func TestInspectGitReportsBranchDiffAndUntrackedFiles(t *testing.T) {
 	if !info.valid || info.branch != "main" || info.changed != 1 || info.untracked != 1 || info.additions != 2 || info.deletions != 1 {
 		t.Fatalf("inspectGit() = %#v, want main with one changed, one untracked, +2/-1", info)
 	}
+	if info.checkoutPath != gitPathKey(repo) || info.commonDir != gitPathKey(filepath.Join(repo, ".git")) || info.linkedWorktree {
+		t.Fatalf("primary checkout identity = %#v", info)
+	}
 	if got := formatGitInfo(info); got != "main · 1 file · +2 · -1 · ?1" {
 		t.Fatalf("formatGitInfo() = %q", got)
+	}
+
+	linkedPath := filepath.Join(t.TempDir(), "linked")
+	mustGit(t, repo, "worktree", "add", "-q", "-b", "feature/linked", linkedPath, "HEAD")
+	linked := inspectGit(linkedPath)
+	if !linked.valid || !linked.linkedWorktree || linked.checkoutPath != gitPathKey(linkedPath) || linked.commonDir != info.commonDir {
+		t.Fatalf("linked checkout identity = %#v, primary = %#v", linked, info)
 	}
 }
 

@@ -109,7 +109,9 @@ func Run() error {
 			p.render()
 			p.requestGitRefresh()
 		case info := <-p.gitUpdated:
+			selectedID := p.selectedWindowID()
 			p.gitByPath = info
+			p.restoreSelectedWindow(selectedID)
 			p.gitRefreshing = false
 			p.lastGitRefresh = time.Now()
 			p.render()
@@ -184,10 +186,19 @@ func (p *picker) filtered() []types.Session {
 		if leftRank != rightRank {
 			return leftRank < rightRank
 		}
-		leftPath := strings.ToLower(filepath.Clean(out[i].Path))
-		rightPath := strings.ToLower(filepath.Clean(out[j].Path))
-		if leftPath != rightPath {
-			return leftPath < rightPath
+		leftOrder := p.repositoryOrder(out[i])
+		rightOrder := p.repositoryOrder(out[j])
+		if leftOrder.family != rightOrder.family {
+			return leftOrder.family < rightOrder.family
+		}
+		if leftOrder.linkedWorktree != rightOrder.linkedWorktree {
+			return !leftOrder.linkedWorktree
+		}
+		if leftOrder.checkout != rightOrder.checkout {
+			return leftOrder.checkout < rightOrder.checkout
+		}
+		if leftOrder.path != rightOrder.path {
+			return leftOrder.path < rightOrder.path
 		}
 		if out[i].Name != out[j].Name {
 			return out[i].Name < out[j].Name
@@ -195,6 +206,37 @@ func (p *picker) filtered() []types.Session {
 		return out[i].WindowIndex < out[j].WindowIndex
 	})
 	return out
+}
+
+type repositoryOrder struct {
+	family         string
+	linkedWorktree bool
+	checkout       string
+	path           string
+}
+
+func (p *picker) repositoryOrder(session types.Session) repositoryOrder {
+	path := strings.ToLower(filepath.Clean(session.Path))
+	order := repositoryOrder{family: path, checkout: path, path: path}
+	info, ok := p.gitByPath[gitPathKey(session.Path)]
+	if !ok || info.commonDir == "" {
+		return order
+	}
+
+	order.family = strings.ToLower(filepath.Clean(info.commonDir))
+	order.linkedWorktree = info.linkedWorktree
+	if !info.linkedWorktree {
+		order.checkout = ""
+		return order
+	}
+	if info.worktreeLabel != "" {
+		order.checkout = strings.ToLower(info.worktreeLabel)
+	} else if info.branch != "" {
+		order.checkout = strings.ToLower(info.branch)
+	} else if info.checkoutPath != "" {
+		order.checkout = strings.ToLower(filepath.Base(info.checkoutPath))
+	}
+	return order
 }
 
 func stateRank(state types.State) int {
@@ -231,6 +273,10 @@ func (p *picker) replaceSessions(next []types.Session) {
 		}
 	}
 	p.sessions = next
+	p.restoreSelectedWindow(selectedID)
+}
+
+func (p *picker) restoreSelectedWindow(selectedID string) {
 	list := p.filtered()
 	if selectedID != "" {
 		for i, session := range list {

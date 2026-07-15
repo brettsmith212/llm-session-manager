@@ -137,12 +137,14 @@ the right pane is the selected agent's live terminal:
   second `Ctrl+x` confirmation; idle agents stop immediately.
 
 Sessions are grouped into **Needs You**, **Active**, and **Idle** sections, then
-by project. Git repositories show their local branch and compact working-tree
-summary (`main · 3 files · +24 · -6 · ?1`). Clean repositories show
-`main · clean`; non-Git or unavailable directories omit that line. Git reads
-are local, cached, and never fetch from a remote. Multiple agents in the same
-working directory appear as muted `shared checkout` metadata; this becomes a
-yellow warning only when more than one of them is actively working.
+by project. Checkouts from the same Git repository sort together within each
+section, with the primary checkout first and its worktrees ordered by task or
+branch beneath it. Git repositories show their local branch and compact
+working-tree summary (`main · 3 files · +24 · -6 · ?1`). Clean repositories
+show `main · clean`; non-Git or unavailable directories omit that line. Git
+reads are local, cached, and never fetch from a remote. Multiple agents in the
+same working directory appear as muted `shared checkout` metadata; this
+becomes a yellow warning only when more than one of them is actively working.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.
