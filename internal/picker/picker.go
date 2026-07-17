@@ -168,8 +168,8 @@ func (p *picker) filtered() []types.Session {
 		if info, ok := p.gitByPath[gitPathKey(s.Path)]; ok {
 			branch = info.branch
 		}
-		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s #%d",
-			s.Path, s.Name, s.WindowName, s.Label, branch, stateLabel, s.WindowIndex))
+		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s",
+			s.Path, s.Name, s.WindowName, s.Label, branch, stateLabel))
 		matches := true
 		for _, term := range terms {
 			if !strings.Contains(haystack, term) {
@@ -448,7 +448,7 @@ func (p *picker) render() {
 			if agentName == "" {
 				agentName = "agent"
 			}
-			editorContext = fmt.Sprintf("%s · %s #%d", projectName(session), agentName, session.WindowIndex)
+			editorContext = fmt.Sprintf("%s · %s", projectName(session), agentName)
 			break
 		}
 		before := p.editLabelValue[:p.editLabelCursor]
@@ -790,7 +790,6 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 	if agentName == "" {
 		agentName = "?"
 	}
-	windowNumber := fmt.Sprintf(" #%d", session.WindowIndex)
 
 	connector := "├─"
 	if isLastInGroup {
@@ -802,13 +801,13 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 
 	statePadded := fmt.Sprintf("%-9s", stateLabel)
 	prefixWidth := indent + 15 // indent + connector + symbol + padded state + separator
-	agentWidth := min(16, max(0, cols-prefixWidth-utf8.RuneCountInString(windowNumber)-2))
+	agentWidth := min(16, max(0, cols-prefixWidth-2))
 	agentName = truncateVisible(agentName, "", "", agentWidth)
 	badge := ""
 	if agentName != "" {
 		badge = formatBadge(agentName, agent.BadgeColor(session.WindowName))
 	}
-	suffixWidth := utf8.RuneCountInString(agentName) + utf8.RuneCountInString(windowNumber)
+	suffixWidth := utf8.RuneCountInString(agentName)
 	if agentName != "" {
 		suffixWidth += 2
 	}
@@ -848,7 +847,7 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 			accent + connector + " " +
 			dot + stateSymbol + " " + txt + statePadded + " " +
 			detailColor + detail + muted + padding + separator +
-			badge + ansi.Background(ansi.Surface0) + muted + windowNumber
+			badge + ansi.Background(ansi.Surface0)
 
 		frame.lineBg(row, line1, ansi.Surface0)
 	} else {
@@ -861,7 +860,7 @@ func drawItem(frame *screenFrame, session types.Session, cols int, selected bool
 			tree + connector + ansi.Reset + " " +
 			dot + stateSymbol + " " + txt + statePadded + " " + ansi.Reset +
 			txt + detail + muted + padding + separator + ansi.Reset +
-			badge + muted + windowNumber + ansi.Reset
+			badge + ansi.Reset
 
 		frame.line(row, line1)
 	}
@@ -1061,7 +1060,7 @@ func (p *picker) setPreviewTitle(session types.Session) {
 	if session.Label != "" {
 		title += " · " + session.Label
 	}
-	title += fmt.Sprintf(" · %s #%d · prefix u returns", session.WindowName, session.WindowIndex)
+	title += fmt.Sprintf(" · %s · prefix u returns", session.WindowName)
 	_ = tmux.RunRaw([]string{"select-pane", "-T",
 		title,
 		"-t", ":" + windowName + ".1"})
@@ -1158,9 +1157,9 @@ func sessionLabel(session types.Session) string {
 		agentName = "agent"
 	}
 	if session.Label != "" {
-		return fmt.Sprintf("%s · %s · %s #%d", projectName(session), session.Label, agentName, session.WindowIndex)
+		return fmt.Sprintf("%s · %s · %s", projectName(session), session.Label, agentName)
 	}
-	return fmt.Sprintf("%s · %s #%d", projectName(session), agentName, session.WindowIndex)
+	return fmt.Sprintf("%s · %s", projectName(session), agentName)
 }
 
 // selectCreatedSession consumes the window ID left by the create prompt and

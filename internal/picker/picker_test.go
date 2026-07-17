@@ -63,7 +63,6 @@ func TestFilteredMatchesSessionMeaning(t *testing.T) {
 		{name: "task label is searchable", query: "oauth callback", wantIDs: []string{"@1"}},
 		{name: "git branch is searchable", query: "feat/oauth", wantIDs: []string{"@1"}},
 		{name: "human attention label is searchable", query: "needs you", wantIDs: []string{"@2"}},
-		{name: "window number is searchable", query: "#2", wantIDs: []string{"@1"}},
 		{name: "stale working session is effectively idle", query: "legacy idle", wantIDs: []string{"@3"}},
 		{name: "all terms must match", query: "api amp", wantIDs: nil},
 	}
@@ -367,7 +366,7 @@ func TestANSIContentIsClippedWithoutBreakingUTF8(t *testing.T) {
 	}
 }
 
-func TestSelectedRowHighlightContinuesBehindWindowNumber(t *testing.T) {
+func TestSelectedRowHighlightExtendsBehindBadge(t *testing.T) {
 	frame := newScreenFrame(80, 1)
 	drawItem(frame, types.Session{
 		Name:        "llm-api",
@@ -378,18 +377,24 @@ func TestSelectedRowHighlightContinuesBehindWindowNumber(t *testing.T) {
 	}, 80, true, 1, true, 2)
 
 	output := captureStdout(t, frame.flush)
-	marker := strings.LastIndex(output, "#0")
+	// The agent badge is the last visible element on the row. The selected
+	// row's background highlight must extend behind it, not reset before it.
+	marker := strings.LastIndex(output, "claude")
 	if marker < 0 {
-		t.Fatalf("selected row did not render its window number: %q", output)
+		t.Fatalf("selected row did not render its agent badge: %q", output)
 	}
 	beforeMarker := output[:marker]
 	lastHighlight := strings.LastIndex(beforeMarker, ansi.Background(ansi.Surface0))
 	lastReset := strings.LastIndex(beforeMarker, ansi.Reset)
 	if lastHighlight < lastReset {
-		t.Fatal("selected row reset its background before the window number")
+		t.Fatal("selected row reset its background before the agent badge")
 	}
 	if !strings.Contains(output, "unnamed task") {
 		t.Fatalf("selected unlabeled session did not advertise explicit naming: %q", output)
+	}
+	// The window number must not appear in the rendered output.
+	if strings.Contains(output, "#0") {
+		t.Fatalf("selected row still renders the window number: %q", output)
 	}
 }
 
@@ -634,7 +639,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "respawn-pane", "-k", "-t", "origin:"+windowName+".0", helperCommand)
 
 	waitFor(t, 5*time.Second, "picker startup", func() bool {
-		return strings.Contains(capturePicker(), "NEEDS YOU") && previewTitle() == "LIVE AGENT · zeta-project · amp #0 · prefix u returns"
+		return strings.Contains(capturePicker(), "NEEDS YOU") && previewTitle() == "LIVE AGENT · zeta-project · amp · prefix u returns"
 	})
 
 	// Enter moves into the already-live agent without closing the control room.
@@ -666,7 +671,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "n")
 	waitFor(t, 2*time.Second, "global attention navigation", func() bool {
-		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "LIVE AGENT · zeta-project · amp #0 · prefix u returns"
+		return !strings.Contains(capturePicker(), "filter:") && previewTitle() == "LIVE AGENT · zeta-project · amp · prefix u returns"
 	})
 
 	// A delayed preview update must not pull focus back from the live pane.
@@ -674,7 +679,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".1")
 	waitFor(t, 2*time.Second, "focus-preserving preview update", func() bool {
 		active := mustTmux(t, "display-message", "-p", "-t", "origin:"+windowName+".1", "#{pane_active}")
-		return active == "1" && previewTitle() == "LIVE AGENT · alpha-project · claude #0 · prefix u returns"
+		return active == "1" && previewTitle() == "LIVE AGENT · alpha-project · claude · prefix u returns"
 	})
 	mustTmux(t, "select-pane", "-t", "origin:"+windowName+".0")
 
@@ -689,7 +694,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 			strings.Contains(screen, "✓ CREATED") &&
 			strings.Contains(screen, "e name task · Enter live · o popup") &&
 			!strings.Contains(screen, "EDIT TASK LABEL") &&
-			previewTitle() == "LIVE AGENT · delta-project · codex #0 · prefix u returns"
+			previewTitle() == "LIVE AGENT · delta-project · codex · prefix u returns"
 	})
 	// Creation returns to normal navigation. Naming is an explicit mode entered
 	// with e, and that mode occupies a prominent full-width accent area.
@@ -697,14 +702,14 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	waitFor(t, 2*time.Second, "explicit task label editor", func() bool {
 		screen := capturePicker()
 		return strings.Contains(screen, "EDIT TASK LABEL") &&
-			strings.Contains(screen, "delta-project · codex #0") &&
+			strings.Contains(screen, "delta-project · codex") &&
 			strings.Contains(screen, "Task ›")
 	})
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "-l", "Refactor picker")
 	mustTmux(t, "send-keys", "-t", "origin:"+windowName+".0", "Enter")
 	waitFor(t, 2*time.Second, "task label save", func() bool {
 		return mustTmux(t, "show-options", "-wqv", "-t", newWindowID, "@llm_label") == "Refactor picker" &&
-			previewTitle() == "LIVE AGENT · delta-project · Refactor picker · codex #0 · prefix u returns"
+			previewTitle() == "LIVE AGENT · delta-project · Refactor picker · codex · prefix u returns"
 	})
 
 	// Waiting/working sessions require confirmation, Escape cancels, and the
