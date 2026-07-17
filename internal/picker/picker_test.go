@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"llm-session-manager/internal/ansi"
+	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/types"
 	"llm-session-manager/internal/worktree"
 )
@@ -854,4 +855,226 @@ func captureStdout(t *testing.T, write func()) string {
 		t.Fatal(err)
 	}
 	return string(output)
+}
+
+func TestPinnedSessionsFormTopSectionAboveAttentionSections(t *testing.T) {
+	now := time.Now().Unix()
+	p := &picker{sessions: []types.Session{
+		{Name: "unpinned-working", WindowID: "@4", Path: "/work/d", State: types.Working, StateAt: now},
+		{Name: "pinned-idle", WindowID: "@2", Path: "/work/b", State: types.Idle, StateAt: now, Pinned: true},
+		{Name: "unpinned-waiting", WindowID: "@3", Path: "/work/c", State: types.Waiting, StateAt: now},
+		{Name: "pinned-waiting", WindowID: "@1", Path: "/work/a", State: types.Waiting, StateAt: now, Pinned: true},
+	}}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	want := []string{"@1", "@2", "@3", "@4"} // pinned (sorted by path a<b), unpinned waiting, unpinned working
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("pinned-aware order = %v, want %v", gotIDs, want)
+	}
+
+	rows := p.buildListRows(got)
+	var text []string
+	for _, row := range rows {
+		text = append(text, row.text)
+	}
+	joined := strings.Join(text, "|")
+	for _, want := range []string{"PINNED · 2", "NEEDS YOU · 1", "ACTIVE · 1"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("section headings %q do not contain %q", joined, want)
+		}
+	}
+	// A pinned session still renders its live state badge, so the pinned idle
+	// session keeps the idle dot rather than being promoted to a working badge.
+	foundPinnedIdle := false
+	for _, row := range rows {
+		if row.kind == listRowSession && got[row.sessionIndex].WindowID == "@2" {
+			foundPinnedIdle = true
+			break
+		}
+	}
+	if !foundPinnedIdle {
+		t.Fatalf("pinned idle session @2 not rendered: %v", rows)
+	}
+}
+
+func TestSessionsInSameDirectorySortByLastUpdated(t *testing.T) {
+	now := time.Now().Unix()
+	p := &picker{sessions: []types.Session{
+		{Name: "shared", WindowID: "@1", WindowIndex: 0, Path: "/work/shared", State: types.Working, StateAt: now - 200},
+		{Name: "shared", WindowID: "@2", WindowIndex: 1, Path: "/work/shared", State: types.Working, StateAt: now},
+	}}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	want := []string{"@2", "@1"} // most-recently-updated first, regardless of window index
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("last-updated order = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestTogglePinFlipsWindowOptionAndInMemoryState(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-picker-pin-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+	mustTmux(t, "new-session", "-d", "-s", "llm-pin", "-n", "amp", "sleep 1000")
+	windowID := mustTmux(t, "display-message", "-p", "-t", "llm-pin:0", "#{window_id}")
+
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{
+		sessions: []types.Session{{
+			Name: "llm-pin", WindowID: windowID, WindowName: "amp",
+			Path: "/work/pin", State: types.Idle, DisplayState: types.Idle,
+		}},
+		previewTimer: timer,
+	}
+
+	captureStdout(t, p.togglePin)
+	if !p.sessions[0].Pinned {
+		t.Fatal("togglePin did not mark the in-memory session as pinned")
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", windowID, "@llm_pinned"); got != "1" {
+		t.Fatalf("@llm_pinned after pin = %q, want 1", got)
+	}
+	if got := p.selectedWindowID(); got != windowID {
+		t.Fatalf("selection after pin = %q, want %q", got, windowID)
+	}
+
+	captureStdout(t, p.togglePin)
+	if p.sessions[0].Pinned {
+		t.Fatal("togglePin did not clear the in-memory pinned flag")
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", windowID, "@llm_pinned"); got != "" {
+		t.Fatalf("@llm_pinned after unpin = %q, want unset", got)
+	}
+}
+
+func TestPinnedSameDirectorySortsByRecencyNotAttention(t *testing.T) {
+	now := time.Now().Unix()
+	// Two pinned sessions in the same directory with different states.
+	// Recency should win over attention: the more recently updated session
+	// surfaces first, even if it is idle and the other is waiting.
+	p := &picker{sessions: []types.Session{
+		{Name: "shared", WindowID: "@1", WindowIndex: 0, Path: "/work/shared", State: types.Waiting, StateAt: now - 300, Pinned: true},
+		{Name: "shared", WindowID: "@2", WindowIndex: 1, Path: "/work/shared", State: types.Idle, StateAt: now, Pinned: true},
+	}}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	want := []string{"@2", "@1"} // recency wins: idle-but-recent before waiting-but-old
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("pinned same-directory recency order = %v, want %v", gotIDs, want)
+	}
+
+	// Projects must remain contiguous in PINNED — no duplicate headings.
+	rows := p.buildListRows(got)
+	projectHeadings := 0
+	for _, row := range rows {
+		if row.kind == listRowProject {
+			projectHeadings++
+		}
+	}
+	if projectHeadings != 1 {
+		t.Fatalf("project headings in pinned same-directory group = %d, want 1 (contiguous)", projectHeadings)
+	}
+}
+
+func TestSharedCheckoutWarningFiresInPinnedWhenNonWorkingLeads(t *testing.T) {
+	now := time.Now().Unix()
+	// One pinned waiting + two pinned working in the same checkout. Recency
+	// ordering places the waiting session first (it has the newest StateAt),
+	// so the project heading is created by a non-working session. The
+	// shared-checkout warning must still fire because two agents are actively
+	// working in that checkout.
+	p := &picker{sessions: []types.Session{
+		{Name: "shared", WindowID: "@1", Path: "/work/shared", State: types.Waiting, StateAt: now, Pinned: true},
+		{Name: "shared", WindowID: "@2", Path: "/work/shared", State: types.Working, StateAt: now - 10, Pinned: true},
+		{Name: "shared", WindowID: "@3", Path: "/work/shared", State: types.Working, StateAt: now - 20, Pinned: true},
+	}}
+
+	rows := p.buildListRows(p.filtered())
+	warnings := 0
+	for _, row := range rows {
+		if row.kind == listRowWarning {
+			warnings++
+			if row.text != "2 agents are active in this checkout" {
+				t.Fatalf("warning text = %q, want %q", row.text, "2 agents are active in this checkout")
+			}
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("shared-checkout warnings in pinned mixed-state group = %d, want 1", warnings)
+	}
+}
+
+func TestPinPersistsAcrossSessionRefresh(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-picker-pin-refresh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+
+	prefix := "llm-"
+	mustTmux(t, "new-session", "-d", "-s", "llm-refresh", "-n", "amp", "sleep 1000")
+	mustTmux(t, "set-option", "-t", "llm-refresh", "@llm_path", "/work/refresh")
+	mustTmux(t, "set-option", "-t", "llm-refresh", "@llm_ever_attached", "1")
+	target := "llm-refresh:0"
+	windowID := mustTmux(t, "display-message", "-p", "-t", target, "#{window_id}")
+	mustTmux(t, "set-option", "-w", "-t", target, "@llm_agent", "amp")
+	mustTmux(t, "set-option", "-w", "-t", target, "@llm_path", "/work/refresh")
+	mustTmux(t, "set-option", "-w", "-t", target, "@llm_state", "idle")
+	mustTmux(t, "set-option", "-w", "-t", target, "@llm_state_at", fmt.Sprint(time.Now().Unix()))
+	mustTmux(t, "set-option", "-w", "-t", target, "@llm_pinned", "1")
+
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{prefix: prefix, previewTimer: timer}
+
+	// Simulate a background refresh: GetAllSessions reads @llm_pinned from tmux.
+	refreshed := sessions.GetAllSessions(prefix)
+	p.replaceSessions(refreshed)
+
+	found := false
+	for _, s := range p.sessions {
+		if s.WindowID == windowID && s.Pinned {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pin state not preserved across refresh: %+v", p.sessions)
+	}
+	if got := p.selectedWindowID(); got != windowID {
+		t.Fatalf("selection after refresh = %q, want %q", got, windowID)
+	}
 }

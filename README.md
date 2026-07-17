@@ -143,11 +143,18 @@ the right pane is the selected agent's live terminal:
   names do not change.
 - `n` jumps to the next agent that needs attention, even when a filter hides it.
 - `/` searches paths, task labels, branches, agents, and states.
+- `p` pins the selected session to a **Pinned** section at the top of the
+  control room. Pinned sessions stay there regardless of state but keep their
+  live `needs you` / `working` / `idle` badge. Press `p` again to unpin. Pin
+  state lives in the window's `@llm_pinned` option and survives picker restarts
+  and tmux refreshes.
 - `Ctrl+x` stops the selected agent. Working and waiting agents require a
   second `Ctrl+x` confirmation; idle agents stop immediately.
 
-Sessions are grouped into **Needs You**, **Active**, and **Idle** sections, then
-by project. Checkouts from the same Git repository sort together within each
+Sessions are grouped into **Pinned**, **Needs You**, **Active**, and **Idle**
+sections, then by project. The **Pinned** section appears only when one or more
+sessions have been pinned with `p` and stays at the top regardless of state.
+Checkouts from the same Git repository sort together within each
 section, with the primary checkout first and its worktrees ordered by task or
 branch beneath it. The repository, its primary checkout, and worktrees are
 rendered as an indented hierarchy rather than unrelated paths. Git repositories
@@ -156,7 +163,10 @@ show their local branch and compact working-tree summary
 non-Git or unavailable directories omit that line. Git reads are local, cached,
 and never fetch from a remote. Multiple agents in the same working directory
 appear as muted `shared checkout` metadata; this becomes a yellow warning only
-when more than one of them is actively working.
+when more than one of them is actively working. Within a single checkout
+directory, agents sort by most-recently-updated first, so the session that
+reported a state change last surfaces above its older siblings regardless of
+its tmux window index.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.

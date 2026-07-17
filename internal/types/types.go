@@ -32,4 +32,5 @@ type Session struct {
 	StateAt      int64
 	Path         string
 	Origin       string
+	Pinned       bool // pinned to the top of the control room via the `p` key (@llm_pinned window option)
 }

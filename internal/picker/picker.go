@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -181,8 +182,8 @@ func (p *picker) filtered() []types.Session {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		leftRank := stateRank(sessionState(out[i]))
-		rightRank := stateRank(sessionState(out[j]))
+		leftRank := sectionRank(out[i])
+		rightRank := sectionRank(out[j])
 		if leftRank != rightRank {
 			return leftRank < rightRank
 		}
@@ -199,6 +200,24 @@ func (p *picker) filtered() []types.Session {
 		}
 		if leftOrder.path != rightOrder.path {
 			return leftOrder.path < rightOrder.path
+		}
+		// Sessions sharing a checkout directory sort by most-recently-updated
+		// first, so the agent that reported a state change last surfaces above
+		// its older siblings regardless of tmux window index. This applies
+		// within every section, including PINNED, where it keeps project
+		// groups contiguous rather than splitting them by attention rank.
+		if out[i].StateAt != out[j].StateAt {
+			return out[i].StateAt > out[j].StateAt
+		}
+		// Attention rank is only a tiebreaker for sessions with identical
+		// timestamps. Non-pinned sections already group by state via
+		// sectionRank, so this only matters inside the mixed-state PINNED
+		// section when two pinned sessions in the same directory share a
+		// StateAt value.
+		leftState := stateRank(sessionState(out[i]))
+		rightState := stateRank(sessionState(out[j]))
+		if leftState != rightState {
+			return leftState < rightState
 		}
 		if out[i].Name != out[j].Name {
 			return out[i].Name < out[j].Name
@@ -248,6 +267,16 @@ func stateRank(state types.State) int {
 	default:
 		return 1
 	}
+}
+
+// sectionRank assigns each session to a control-room section. Pinned sessions
+// form their own top section regardless of state; the remaining sessions fall
+// into the needs-you / active / idle sections by attention rank.
+func sectionRank(session types.Session) int {
+	if session.Pinned {
+		return 0
+	}
+	return stateRank(sessionState(session)) + 1
 }
 
 func sessionState(session types.Session) types.State {
@@ -360,7 +389,7 @@ func truncateVisible(str, prefix, suffix string, maxVisible int) string {
 func (p *picker) snapshot() string {
 	parts := make([]string, len(p.sessions))
 	for i, s := range p.sessions {
-		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%s:%d:%s:%s:%s", s.Name, s.WindowID, s.WindowIndex, s.State, sessionState(s), s.StateAt, s.Path, s.WindowName, s.Label)
+		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%s:%d:%s:%s:%s:%t", s.Name, s.WindowID, s.WindowIndex, s.State, sessionState(s), s.StateAt, s.Path, s.WindowName, s.Label, s.Pinned)
 	}
 	return strings.Join(parts, "|")
 }
@@ -490,14 +519,14 @@ func (p *picker) render() {
 
 	footerRow := rows
 	if rows >= 6 {
-		footer := "  a add · A worktree · e label · n needs you · s agent · ^x stop · q close"
+		footer := "  a add · A worktree · e label · n needs you · p pin · s agent · ^x stop · q close"
 		if p.selectedIsManagedWorktree() {
-			footer = "  a add · A worktree · D cleanup · e label · n needs you · ^x stop · q close"
+			footer = "  a add · A worktree · D cleanup · e label · n needs you · p pin · ^x stop · q close"
 		}
 		if cols < 60 {
-			footer = "  a add · A tree · e label · n next · ^x stop · q"
+			footer = "  a add · A tree · e label · n next · p pin · ^x stop · q"
 			if p.selectedIsManagedWorktree() {
-				footer = "  a add · A tree · D clean · n next · ^x stop · q"
+				footer = "  a add · A tree · D clean · n next · p pin · ^x stop · q"
 			}
 		}
 		frame.line(footerRow, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Overlay0), footer, ansi.Reset))
@@ -579,31 +608,52 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 	if len(list) == 0 {
 		return nil
 	}
-	stateCounts := [3]int{}
+	// sectionCounts indexes by sectionRank: 0=pinned, 1=needs you,
+	// 2=active, 3=idle.
+	sectionCounts := [4]int{}
 	for _, session := range list {
-		stateCounts[stateRank(sessionState(session))]++
+		sectionCounts[sectionRank(session)]++
 	}
 	activity := p.pathActivity()
+	// groupWorking counts working agents per (project, section) so the
+	// shared-checkout warning fires whenever a project group within a single
+	// section has more than one actively working agent — even in the PINNED
+	// section, where a non-working session may lead a mixed-state group.
+	groupWorking := make(map[string]int)
+	for _, session := range list {
+		if sessionState(session) != types.Working {
+			continue
+		}
+		key := gitPathKey(session.Path)
+		if key == "" {
+			key = session.Name
+		}
+		groupWorking[key+"\x00"+strconv.Itoa(sectionRank(session))]++
+	}
 	rows := make([]pickerListRow, 0, len(list)*2)
 	previousRank := -1
 	previousFamily := ""
 	previousProject := ""
 	for i, session := range list {
-		rank := stateRank(sessionState(session))
+		rank := sectionRank(session)
 		if rank != previousRank {
 			if previousRank != -1 {
 				rows = append(rows, pickerListRow{kind: listRowSpacer})
 			}
 			name := "ACTIVE"
 			color := ansi.Blue
-			if rank == 0 {
+			switch rank {
+			case 0:
+				name = "PINNED"
+				color = ansi.Mauve
+			case 1:
 				name = "NEEDS YOU"
 				color = ansi.Yellow
-			} else if rank == 2 {
+			case 3:
 				name = "IDLE"
 				color = ansi.Subtext0
 			}
-			rows = append(rows, pickerListRow{kind: listRowSection, text: fmt.Sprintf("%s · %d", name, stateCounts[rank]), color: color})
+			rows = append(rows, pickerListRow{kind: listRowSection, text: fmt.Sprintf("%s · %d", name, sectionCounts[rank]), color: color})
 			previousRank = rank
 			previousFamily = ""
 			previousProject = ""
@@ -664,8 +714,13 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			if metadata != "" {
 				rows = append(rows, pickerListRow{kind: listRowGit, text: metadata, indent: detailIndent})
 			}
-			if shared := activity[projectKey]; rank == stateRank(types.Working) && shared.working > 1 {
-				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents are active in this checkout", shared.working), indent: detailIndent})
+			// Warn once per project group when more than one agent in this
+			// specific (project, section) group is actively working. Using the
+			// per-group count rather than the leading session's state keeps this
+			// correct inside the PINNED section, where a non-working session may
+			// lead a group that contains actively working agents.
+			if working := groupWorking[projectKey+"\x00"+strconv.Itoa(rank)]; working > 1 {
+				rows = append(rows, pickerListRow{kind: listRowWarning, text: fmt.Sprintf("%d agents are active in this checkout", working), indent: detailIndent})
 			}
 			previousProject = projectKey
 		}
@@ -677,7 +732,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			if nextKey == "" {
 				nextKey = next.Name
 			}
-			nextSameProject = stateRank(sessionState(next)) == rank && nextKey == projectKey
+			nextSameProject = sectionRank(next) == rank && nextKey == projectKey
 		}
 		rows = append(rows, pickerListRow{kind: listRowSession, sessionIndex: i, isLast: !nextSameProject, indent: detailIndent})
 	}
@@ -1560,6 +1615,49 @@ func (p *picker) cycleAgent() {
 	p.render()
 }
 
+// togglePin pins or unpins the selected session. Pin state is persisted in
+// the @llm_pinned window option so it survives picker restarts and tmux
+// refreshes; the in-memory copy is updated so the re-render is immediate.
+func (p *picker) togglePin() {
+	list := p.filtered()
+	if p.selectedIndex < 0 || p.selectedIndex >= len(list) {
+		return
+	}
+	session := list[p.selectedIndex]
+	selectedID := session.WindowID
+
+	// Persist first. Only flip the in-memory flag after tmux confirms the
+	// option change so the UI can never disagree with the durable state.
+	if session.Pinned {
+		if err := tmux.UnsetWindowOption(selectedID, "@llm_pinned"); err != nil {
+			p.notice = "couldn't unpin: " + err.Error()
+			p.noticeError = true
+			p.render()
+			return
+		}
+	} else {
+		if err := tmux.SetWindowOption(selectedID, "@llm_pinned", "1"); err != nil {
+			p.notice = "couldn't pin: " + err.Error()
+			p.noticeError = true
+			p.render()
+			return
+		}
+	}
+	for i := range p.sessions {
+		if p.sessions[i].WindowID == selectedID {
+			p.sessions[i].Pinned = !p.sessions[i].Pinned
+			break
+		}
+	}
+	p.restoreSelectedWindow(selectedID)
+	p.activateErr = ""
+	p.confirmStopID = ""
+	p.confirmLabel = ""
+	p.confirmWorktree = ""
+	p.notice = ""
+	p.renderSelection()
+}
+
 func (p *picker) handleKeys(data string) (done bool) {
 	keys := parseKeys(data)
 	for _, key := range keys {
@@ -1626,6 +1724,8 @@ func (p *picker) handleKeys(data string) (done bool) {
 			p.selectNextWaiting()
 		case "s":
 			p.cycleAgent()
+		case "p":
+			p.togglePin()
 		case "\x18": // ^x
 			p.confirmWorktree = ""
 			p.killSelected()

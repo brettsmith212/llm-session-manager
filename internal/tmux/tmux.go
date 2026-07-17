@@ -82,6 +82,13 @@ func SetWindowOption(window, name, value string) error {
 	return err
 }
 
+// UnsetWindowOption clears a window option, returning an error if tmux rejects
+// the command. Unsetting an already-unset option is not an error in tmux.
+func UnsetWindowOption(window, name string) error {
+	_, err := Run([]string{"set-window-option", "-t", window, "-u", name})
+	return err
+}
+
 // SetGlobalOption sets a global option.
 func SetGlobalOption(name, value string) error {
 	_, err := Run([]string{"set-option", "-g", name, value})
