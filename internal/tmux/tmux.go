@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Result captures the output and exit code of a tmux invocation.
@@ -113,25 +114,34 @@ func AttachCommand(name string, clearTmuxEnv bool) string {
 
 // ClientInfo describes an attached tmux client.
 type ClientInfo struct {
-	Client  string
-	Session string
-	Window  string
+	Client      string
+	Session     string
+	Window      string
+	WindowID    string
+	WindowWidth int
 }
 
 // ListClients returns the list of attached clients.
 func ListClients() []ClientInfo {
-	result := RunRaw([]string{"list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_name}"})
+	result := RunRaw([]string{"list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_name}\t#{window_id}\t#{window_width}"})
 	if result.ExitCode != 0 || result.Stdout == "" {
 		return nil
 	}
 	lines := strings.Split(result.Stdout, "\n")
 	clients := make([]ClientInfo, 0, len(lines))
 	for _, line := range lines {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) != 5 {
 			continue
 		}
-		clients = append(clients, ClientInfo{Client: parts[0], Session: parts[1], Window: parts[2]})
+		width, _ := strconv.Atoi(parts[4])
+		clients = append(clients, ClientInfo{
+			Client:      parts[0],
+			Session:     parts[1],
+			Window:      parts[2],
+			WindowID:    parts[3],
+			WindowWidth: width,
+		})
 	}
 	return clients
 }
@@ -159,6 +169,12 @@ func KillWindow(target string) error {
 	return err
 }
 
+// KillPane kills a tmux pane.
+func KillPane(target string) error {
+	_, err := Run([]string{"kill-pane", "-t", target})
+	return err
+}
+
 // RenameWindow renames a tmux window.
 func RenameWindow(target, name string) error {
 	_, err := Run([]string{"rename-window", "-t", target, name})
@@ -181,19 +197,73 @@ func DisplayMessage(format string, target string) (string, error) {
 	return Run(args)
 }
 
-// DisplayClientMessage shows a transient message without taking focus or
-// preventing input from reaching the client's active pane.
-func DisplayClientMessage(client, message string, duration time.Duration) error {
-	args := []string{
-		"display-message",
-		"-c", client,
-		"-d", strconv.FormatInt(duration.Milliseconds(), 10),
-		"-N",
-		"-C",
-		message,
+// SupportsFloatingPanes reports whether the connected tmux server provides
+// the non-modal new-pane command introduced in tmux 3.7.
+func SupportsFloatingPanes() bool {
+	return RunRaw([]string{"list-commands", "new-pane"}).ExitCode == 0
+}
+
+// DisplayFloatingNotification creates a detached top-right floating pane. A
+// previous llmux notification in the same window is replaced, and the pane is
+// removed automatically when its command exits.
+func DisplayFloatingNotification(windowID string, windowWidth int, message string, duration time.Duration) (string, error) {
+	if windowID == "" || windowWidth < 10 {
+		return "", nil
 	}
-	_, err := Run(args)
-	return err
+
+	result := RunRaw([]string{"list-panes", "-t", windowID, "-F", "#{pane_id}\t#{@llm_notification}"})
+	if result.ExitCode == 0 {
+		for _, line := range strings.Split(result.Stdout, "\n") {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) == 2 && parts[1] == "1" {
+				_ = KillPane(parts[0])
+			}
+		}
+	}
+
+	const (
+		minimumWidth = 24
+		panePadding  = 4
+	)
+	width := max(minimumWidth, utf8.RuneCountInString(message)+panePadding)
+	width = min(width, windowWidth)
+	message = truncateRunes(message, max(1, width-panePadding))
+	x := max(0, windowWidth-width)
+	seconds := strconv.FormatFloat(duration.Seconds(), 'f', 3, 64)
+	args := []string{
+		"new-pane", "-d", "-P", "-F", "#{pane_id}",
+		"-t", windowID,
+		"-x", strconv.Itoa(width), "-y", "3",
+		"-X", strconv.Itoa(x), "-Y", "0",
+		"-s", "bg=yellow,fg=black",
+		"-S", "fg=yellow", "-R", "fg=yellow",
+		"sh", "-c", `printf '\n  %s' "$1"; sleep "$2"`,
+		"llmux-notification", message, seconds,
+	}
+	paneID, err := Run(args)
+	if err != nil {
+		return "", err
+	}
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return "", fmt.Errorf("tmux new-pane returned an empty pane id")
+	}
+	if _, err := Run([]string{"set-option", "-p", "-t", paneID, "@llm_notification", "1"}); err != nil {
+		_ = KillPane(paneID)
+		return "", err
+	}
+	return paneID, nil
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 // DisplayPopupOptions configures a tmux display-popup command.

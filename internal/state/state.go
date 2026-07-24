@@ -80,19 +80,29 @@ func SetState(state types.State) error {
 }
 
 func notifyWaitingClients(prefix string, session types.Session) {
+	if !tmux.SupportsFloatingPanes() {
+		return
+	}
 	message := waitingNotificationMessage(session)
-	for _, client := range notificationClients(prefix, tmux.ListClients()) {
-		_ = tmux.DisplayClientMessage(client, message, waitingNotificationDuration)
+	for _, window := range notificationWindows(prefix, tmux.ListClients()) {
+		_, _ = tmux.DisplayFloatingNotification(window.id, window.width, message, waitingNotificationDuration)
 	}
 }
 
-func notificationClients(prefix string, clients []tmux.ClientInfo) []string {
-	targets := make([]string, 0, len(clients))
+type notificationWindow struct {
+	id    string
+	width int
+}
+
+func notificationWindows(prefix string, clients []tmux.ClientInfo) []notificationWindow {
+	targets := make([]notificationWindow, 0, len(clients))
+	seen := make(map[string]bool)
 	for _, client := range clients {
-		if client.Client == "" || strings.HasPrefix(client.Session, prefix) {
+		if client.Client == "" || client.WindowID == "" || strings.HasPrefix(client.Session, prefix) || seen[client.WindowID] {
 			continue
 		}
-		targets = append(targets, client.Client)
+		seen[client.WindowID] = true
+		targets = append(targets, notificationWindow{id: client.WindowID, width: client.WindowWidth})
 	}
 	return targets
 }
@@ -114,7 +124,5 @@ func waitingNotificationMessage(session types.Session) string {
 		}
 		return r
 	}, name)
-	// Escape user-controlled tmux format markers while retaining our color.
-	name = strings.ReplaceAll(name, "#", "##")
-	return "#[fg=yellow]" + name + ": Needs Review#[default]"
+	return name + ": Needs Review"
 }

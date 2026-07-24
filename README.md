@@ -118,18 +118,20 @@ set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
 `llmux` also maintains the numeric `@llm_waiting_count` option for custom
 status formats. Both values update whenever an agent reports a state change.
 
-When an agent first enters `waiting`, llmux also shows a yellow notification
-for about five seconds on every attached client on the current tmux server,
-except clients attached directly to managed `llm-*` sessions. This means an
-agent in one project can request attention while you work in Neovim in another
-project window. Repeated `waiting` hooks do not repeat the notification; leaving
-and re-entering `waiting` does. The notice uses the task label when available,
-then the project directory name, for example `api-server: Needs Review`.
+On tmux 3.7 or newer, when an agent first enters `waiting`, llmux also shows a
+yellow notification for about five seconds in the top-right of every window
+currently displayed by an attached client on the tmux server. Clients attached
+directly to managed `llm-*` sessions are excluded. This means an agent in one
+project can request attention while you work in Neovim in another project
+window. Repeated `waiting` hooks do not repeat the notification; leaving and
+re-entering `waiting` does. A newer notice replaces an existing llmux notice in
+the same window. The text uses the task label when available, then the project
+directory name, for example `api-server: Needs Review`.
 
-Notifications use tmux 3.7's non-modal `display-message` behavior so they do
-not change focus, consume input, or create a window. Tmux displays the notice
-in its message/status area; its exact placement follows the user's tmux status
-configuration and cannot be guaranteed to be a top-right corner popup.
+Notifications use tmux 3.7's non-modal floating panes, so they do not change
+focus, consume input, or create a persistent window or pane. On older tmux
+versions, transient notifications are disabled; Control Room state,
+`@llm_waiting_count`, and `@llm_status` continue to work normally.
 
 ### Control room
 

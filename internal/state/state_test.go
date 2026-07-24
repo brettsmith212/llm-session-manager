@@ -21,17 +21,17 @@ func TestWaitingNotificationMessage(t *testing.T) {
 		{
 			name:    "label preferred",
 			session: types.Session{Label: "Review API", Path: "/work/api", Name: "llm-api"},
-			want:    "#[fg=yellow]Review API: Needs Review#[default]",
+			want:    "Review API: Needs Review",
 		},
 		{
 			name:    "directory fallback",
 			session: types.Session{Label: "  ", Path: "/work/api-server", Name: "llm-api"},
-			want:    "#[fg=yellow]api-server: Needs Review#[default]",
+			want:    "api-server: Needs Review",
 		},
 		{
 			name:    "session fallback and escaping",
 			session: types.Session{Name: "llm-#danger\nname"},
-			want:    "#[fg=yellow]llm-##danger name: Needs Review#[default]",
+			want:    "llm-#danger name: Needs Review",
 		},
 	}
 	for _, tt := range tests {
@@ -43,16 +43,17 @@ func TestWaitingNotificationMessage(t *testing.T) {
 	}
 }
 
-func TestNotificationClientsExcludeManagedSessions(t *testing.T) {
+func TestNotificationWindowsExcludeManagedSessionsAndDeduplicateWindows(t *testing.T) {
 	clients := []tmux.ClientInfo{
-		{Client: "/dev/ttys001", Session: "0"},
-		{Client: "/dev/ttys002", Session: "work"},
-		{Client: "/dev/ttys003", Session: "llm-api"},
-		{Session: "0"},
+		{Client: "/dev/ttys001", Session: "0", WindowID: "@1", WindowWidth: 120},
+		{Client: "/dev/ttys002", Session: "work", WindowID: "@2", WindowWidth: 100},
+		{Client: "/dev/ttys003", Session: "other", WindowID: "@1", WindowWidth: 120},
+		{Client: "/dev/ttys004", Session: "llm-api", WindowID: "@3", WindowWidth: 80},
+		{Session: "0", WindowID: "@4", WindowWidth: 80},
 	}
-	want := []string{"/dev/ttys001", "/dev/ttys002"}
-	if got := notificationClients("llm-", clients); !reflect.DeepEqual(got, want) {
-		t.Fatalf("notificationClients() = %v, want %v", got, want)
+	want := []notificationWindow{{id: "@1", width: 120}, {id: "@2", width: 100}}
+	if got := notificationWindows("llm-", clients); !reflect.DeepEqual(got, want) {
+		t.Fatalf("notificationWindows() = %v, want %v", got, want)
 	}
 }
 
