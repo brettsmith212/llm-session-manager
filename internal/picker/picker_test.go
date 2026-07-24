@@ -186,6 +186,23 @@ func TestReplaceSessionsPreservesSelectedWindowAcrossStateReordering(t *testing.
 	}
 }
 
+func TestReplaceSessionsPreservesSelectedWindowAcrossProjectRecencyReordering(t *testing.T) {
+	p := &picker{sessions: []types.Session{
+		{Name: "alpha-one", WindowID: "@1", Path: "/work/alpha", State: types.Idle, StateAt: 300},
+		{Name: "alpha-two", WindowID: "@2", Path: "/work/alpha", State: types.Idle, StateAt: 100},
+		{Name: "zeta", WindowID: "@3", Path: "/work/zeta", State: types.Idle, StateAt: 200},
+	}}
+	p.selectedIndex = 1 // @2, the second session in the currently leading alpha group
+	p.replaceSessions([]types.Session{
+		{Name: "alpha-one", WindowID: "@1", Path: "/work/alpha", State: types.Idle, StateAt: 300},
+		{Name: "alpha-two", WindowID: "@2", Path: "/work/alpha", State: types.Idle, StateAt: 100},
+		{Name: "zeta", WindowID: "@3", Path: "/work/zeta", State: types.Idle, StateAt: 400},
+	})
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("selected window after project recency reorder = %q, want @2", got)
+	}
+}
+
 func TestRepositorySortingKeepsPrimaryCheckoutBeforeItsWorktrees(t *testing.T) {
 	const (
 		commonDir = "/projects/zeta/.git"
@@ -690,7 +707,7 @@ func TestPickerWorkflowInIsolatedTmux(t *testing.T) {
 	waitFor(t, 4*time.Second, "new session handoff", func() bool {
 		screen := capturePicker()
 		return tmuxSucceeds("has-session", "-t", "origin") &&
-			strings.Contains(screen, "4/4") &&
+			strings.Contains(screen, "3/4") &&
 			strings.Contains(screen, "✓ CREATED") &&
 			strings.Contains(screen, "e name task · Enter live · o popup") &&
 			!strings.Contains(screen, "EDIT TASK LABEL") &&
@@ -804,7 +821,7 @@ func waitFor(t *testing.T, timeout time.Duration, description string, condition 
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s\npicker:\n%s", description, capturePicker())
+	t.Fatalf("timed out waiting for %s\npreview: %s\npicker:\n%s", description, previewTitle(), capturePicker())
 }
 
 func mustTmux(t *testing.T, args ...string) string {
@@ -903,6 +920,193 @@ func TestPinnedSessionsFormTopSectionAboveAttentionSections(t *testing.T) {
 	}
 	if !foundPinnedIdle {
 		t.Fatalf("pinned idle session @2 not rendered: %v", rows)
+	}
+}
+
+func TestProjectGroupsSortByRecencyWithinAttentionSections(t *testing.T) {
+	now := time.Now().Unix()
+	p := &picker{sessions: []types.Session{
+		{Name: "pinned-alpha", WindowID: "@1", Path: "/work/alpha-pinned", State: types.Idle, StateAt: now - 90, Pinned: true},
+		{Name: "pinned-zeta", WindowID: "@2", Path: "/work/zeta-pinned", State: types.Working, StateAt: now - 10, Pinned: true},
+		{Name: "waiting-alpha", WindowID: "@3", Path: "/work/alpha-waiting", State: types.Waiting, StateAt: now - 80},
+		{Name: "waiting-zeta", WindowID: "@4", Path: "/work/zeta-waiting", State: types.Waiting, StateAt: now - 20},
+		{Name: "active-alpha-old", WindowID: "@5", Path: "/work/alpha-active", State: types.Working, StateAt: now - 75},
+		{Name: "active-alpha-new", WindowID: "@6", Path: "/work/alpha-active", State: types.Working, StateAt: now - 70},
+		{Name: "active-zeta", WindowID: "@7", Path: "/work/zeta-active", State: types.Working, StateAt: now - 30},
+		{Name: "idle-alpha", WindowID: "@8", Path: "/work/alpha-idle", State: types.Idle, StateAt: now - 60},
+		{Name: "idle-zeta", WindowID: "@9", Path: "/work/zeta-idle", State: types.Idle, StateAt: now - 40},
+	}}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	want := []string{"@2", "@1", "@4", "@3", "@7", "@6", "@5", "@9", "@8"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("section and project recency order = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestRepositoryAndCheckoutGroupsUseTwoLevelRecency(t *testing.T) {
+	const (
+		alphaPrimary = "/projects/alpha"
+		alphaTree    = "/worktrees/alpha/task"
+		zetaPrimary  = "/projects/zeta"
+		zetaTree     = "/worktrees/zeta/task"
+	)
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "alpha-primary", WindowID: "@1", Path: alphaPrimary, State: types.Working, StateAt: 100},
+			{Name: "alpha-tree", WindowID: "@2", Path: alphaTree, State: types.Working, StateAt: 900},
+			{Name: "zeta-primary", WindowID: "@3", Path: zetaPrimary, State: types.Working, StateAt: 800},
+			{Name: "zeta-tree", WindowID: "@4", Path: zetaTree, State: types.Working, StateAt: 700},
+		},
+		gitByPath: map[string]gitInfo{
+			gitPathKey(alphaPrimary): {valid: true, commonDir: alphaPrimary + "/.git", checkoutPath: alphaPrimary},
+			gitPathKey(alphaTree):    {valid: true, commonDir: alphaPrimary + "/.git", checkoutPath: alphaTree, linkedWorktree: true, worktreeLabel: "Task"},
+			gitPathKey(zetaPrimary):  {valid: true, commonDir: zetaPrimary + "/.git", checkoutPath: zetaPrimary},
+			gitPathKey(zetaTree):     {valid: true, commonDir: zetaPrimary + "/.git", checkoutPath: zetaTree, linkedWorktree: true, worktreeLabel: "Task"},
+		},
+	}
+
+	got := p.filtered()
+	gotIDs := make([]string, len(got))
+	for i, session := range got {
+		gotIDs[i] = session.WindowID
+	}
+	// Alpha's newer worktree makes that repository first, and the worktree
+	// precedes its older primary checkout. Zeta remains contiguous behind it.
+	want := []string{"@2", "@1", "@3", "@4"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("two-level repository recency order = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestFilteredProjectRecencyUsesVisibleSessions(t *testing.T) {
+	p := &picker{
+		query: "visible",
+		sessions: []types.Session{
+			{Name: "alpha-hidden", WindowID: "@1", Label: "hidden", Path: "/work/alpha", State: types.Working, StateAt: 900},
+			{Name: "alpha-visible", WindowID: "@2", Label: "visible", Path: "/work/alpha", State: types.Working, StateAt: 100},
+			{Name: "zeta-visible", WindowID: "@3", Label: "visible", Path: "/work/zeta", State: types.Working, StateAt: 800},
+		},
+	}
+	got := p.filtered()
+	if len(got) != 2 || got[0].WindowID != "@3" || got[1].WindowID != "@2" {
+		t.Fatalf("visible-only recency order = %+v, want @3 then @2", got)
+	}
+}
+
+func TestVimEndpointNavigationUsesFilteredList(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "alpha", WindowID: "@1", Path: "/work/alpha", State: types.Working, StateAt: 100},
+			{Name: "beta-one", WindowID: "@2", Path: "/work/beta-one", State: types.Working, StateAt: 300},
+			{Name: "beta-two", WindowID: "@3", Path: "/work/beta-two", State: types.Working, StateAt: 200},
+		},
+		query:        "beta",
+		previewTimer: timer,
+	}
+
+	captureStdout(t, func() { p.handleKeys("G") })
+	if got := p.selectedWindowID(); got != "@3" {
+		t.Fatalf("G selected %q, want last filtered session @3", got)
+	}
+	if p.pendingPreview.WindowID != "@3" {
+		t.Fatalf("G pending preview = %q, want @3", p.pendingPreview.WindowID)
+	}
+	captureStdout(t, func() { p.handleKeys("gg") })
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("gg selected %q, want first filtered session @2", got)
+	}
+	if p.pendingPreview.WindowID != "@2" {
+		t.Fatalf("gg pending preview = %q, want @2", p.pendingPreview.WindowID)
+	}
+
+	p.query = ""
+	p.selectedIndex = 1
+	captureStdout(t, func() { p.handleKeys("gg") })
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("unfiltered gg selected %q, want first session @2", got)
+	}
+	captureStdout(t, func() { p.handleKeys("G") })
+	if got := p.selectedWindowID(); got != "@1" {
+		t.Fatalf("unfiltered G selected %q, want last session @1", got)
+	}
+}
+
+func TestVimEndpointNavigationHandlesEmptyExpiredAndInterruptedSequences(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{
+		sessions: []types.Session{
+			{Name: "one", WindowID: "@1", Path: "/work/one", State: types.Working, StateAt: 200},
+			{Name: "two", WindowID: "@2", Path: "/work/two", State: types.Working, StateAt: 100},
+		},
+		selectedIndex: 1,
+		previewTimer:  timer,
+	}
+
+	p.pendingGUntil = time.Now().Add(-time.Millisecond)
+	p.handleKeys("g")
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("expired gg selected %q, want unchanged @2", got)
+	}
+	captureStdout(t, func() { p.handleKeys("j") })
+	p.handleKeys("g")
+	if got := p.selectedWindowID(); got != "@2" {
+		t.Fatalf("interrupted g sequence selected %q, want @2", got)
+	}
+
+	p.query = "missing"
+	p.selectedIndex = 1
+	p.hasPendingPreview = false
+	p.handleKeys("ggG")
+	if p.selectedIndex != 1 || p.hasPendingPreview {
+		t.Fatalf("empty-list navigation changed picker: index=%d pendingPreview=%v", p.selectedIndex, p.hasPendingPreview)
+	}
+}
+
+func TestVimEndpointNavigationIsInertOutsideNormalNavigation(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	t.Cleanup(func() { timer.Stop() })
+	p := &picker{isSearching: true, previewTimer: timer}
+	captureStdout(t, func() { p.handleKeys("gG") })
+	if p.query != "gG" {
+		t.Fatalf("search query = %q, want literal gG", p.query)
+	}
+
+	p = &picker{isEditingLabel: true, editLabelValue: "task", editLabelCursor: 4, previewTimer: timer}
+	captureStdout(t, func() { p.handleKeys("gG") })
+	if p.editLabelValue != "taskgG" {
+		t.Fatalf("edited label = %q, want literal taskgG", p.editLabelValue)
+	}
+
+	p = &picker{
+		sessions: []types.Session{
+			{Name: "one", WindowID: "@1", Path: "/work/one", State: types.Working},
+			{Name: "two", WindowID: "@2", Path: "/work/two", State: types.Working},
+		},
+		selectedIndex:   1,
+		confirmStopID:   "@2",
+		confirmLabel:    "two",
+		confirmWorktree: "/work/two",
+	}
+	p.handleKeys("ggG")
+	if p.selectedIndex != 1 || p.confirmStopID != "@2" || p.confirmWorktree != "/work/two" {
+		t.Fatalf("g/G changed confirmation state: index=%d stop=%q worktree=%q", p.selectedIndex, p.confirmStopID, p.confirmWorktree)
 	}
 }
 

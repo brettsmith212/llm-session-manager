@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Result captures the output and exit code of a tmux invocation.
@@ -177,6 +179,21 @@ func DisplayMessage(format string, target string) (string, error) {
 	}
 	args = append(args, format)
 	return Run(args)
+}
+
+// DisplayClientMessage shows a transient message without taking focus or
+// preventing input from reaching the client's active pane.
+func DisplayClientMessage(client, message string, duration time.Duration) error {
+	args := []string{
+		"display-message",
+		"-c", client,
+		"-d", strconv.FormatInt(duration.Milliseconds(), 10),
+		"-N",
+		"-C",
+		message,
+	}
+	_, err := Run(args)
+	return err
 }
 
 // DisplayPopupOptions configures a tmux display-popup command.

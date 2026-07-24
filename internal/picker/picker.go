@@ -30,6 +30,7 @@ const (
 	worktreeHostOption    = "@llm_worktree_host"
 	previewDelay          = 75 * time.Millisecond
 	gitRefreshInterval    = 4 * time.Second
+	navigationKeyTimeout  = 500 * time.Millisecond
 )
 
 // Run starts the ANSI session picker.
@@ -157,6 +158,7 @@ type picker struct {
 	gitByPath         map[string]gitInfo
 	gitRefreshing     bool
 	lastGitRefresh    time.Time
+	pendingGUntil     time.Time
 }
 
 func (p *picker) filtered() []types.Session {
@@ -181,6 +183,19 @@ func (p *picker) filtered() []types.Session {
 			out = append(out, s)
 		}
 	}
+	familyRecency := make(map[familyRecencyKey]int64)
+	checkoutRecency := make(map[checkoutRecencyKey]int64)
+	for _, session := range out {
+		order := p.repositoryOrder(session)
+		familyKey := familyRecencyKey{section: sectionRank(session), family: order.family}
+		checkoutKey := checkoutRecencyKey{familyRecencyKey: familyKey, path: order.path}
+		if session.StateAt > familyRecency[familyKey] {
+			familyRecency[familyKey] = session.StateAt
+		}
+		if session.StateAt > checkoutRecency[checkoutKey] {
+			checkoutRecency[checkoutKey] = session.StateAt
+		}
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		leftRank := sectionRank(out[i])
 		rightRank := sectionRank(out[j])
@@ -189,8 +204,18 @@ func (p *picker) filtered() []types.Session {
 		}
 		leftOrder := p.repositoryOrder(out[i])
 		rightOrder := p.repositoryOrder(out[j])
+		leftFamilyKey := familyRecencyKey{section: leftRank, family: leftOrder.family}
+		rightFamilyKey := familyRecencyKey{section: rightRank, family: rightOrder.family}
+		if familyRecency[leftFamilyKey] != familyRecency[rightFamilyKey] {
+			return familyRecency[leftFamilyKey] > familyRecency[rightFamilyKey]
+		}
 		if leftOrder.family != rightOrder.family {
 			return leftOrder.family < rightOrder.family
+		}
+		leftCheckoutKey := checkoutRecencyKey{familyRecencyKey: leftFamilyKey, path: leftOrder.path}
+		rightCheckoutKey := checkoutRecencyKey{familyRecencyKey: rightFamilyKey, path: rightOrder.path}
+		if checkoutRecency[leftCheckoutKey] != checkoutRecency[rightCheckoutKey] {
+			return checkoutRecency[leftCheckoutKey] > checkoutRecency[rightCheckoutKey]
 		}
 		if leftOrder.linkedWorktree != rightOrder.linkedWorktree {
 			return !leftOrder.linkedWorktree
@@ -222,9 +247,22 @@ func (p *picker) filtered() []types.Session {
 		if out[i].Name != out[j].Name {
 			return out[i].Name < out[j].Name
 		}
-		return out[i].WindowIndex < out[j].WindowIndex
+		if out[i].WindowIndex != out[j].WindowIndex {
+			return out[i].WindowIndex < out[j].WindowIndex
+		}
+		return out[i].WindowID < out[j].WindowID
 	})
 	return out
+}
+
+type familyRecencyKey struct {
+	section int
+	family  string
+}
+
+type checkoutRecencyKey struct {
+	familyRecencyKey
+	path string
 }
 
 type repositoryOrder struct {
@@ -1089,6 +1127,14 @@ func (p *picker) changeSelection(delta int) {
 	p.renderSelection()
 }
 
+func (p *picker) jumpSelection(index int) {
+	list := p.filtered()
+	if len(list) == 0 {
+		return
+	}
+	p.changeSelection(index - p.selectedIndex)
+}
+
 func (p *picker) selectNextWaiting() {
 	p.confirmStopID = ""
 	p.confirmLabel = ""
@@ -1662,9 +1708,11 @@ func (p *picker) handleKeys(data string) (done bool) {
 	for _, key := range keys {
 		switch key {
 		case "\x1b[200~":
+			p.pendingGUntil = time.Time{}
 			p.isPasting = true
 			continue
 		case "\x1b[201~":
+			p.pendingGUntil = time.Time{}
 			p.isPasting = false
 			continue
 		}
@@ -1672,13 +1720,36 @@ func (p *picker) handleKeys(data string) (done bool) {
 			continue
 		}
 		if p.isEditingLabel {
+			p.pendingGUntil = time.Time{}
 			p.handleLabelKey(key)
 			continue
 		}
 		if p.isSearching {
+			p.pendingGUntil = time.Time{}
 			done := p.handleSearchKey(key)
 			if done {
 				return true
+			}
+			continue
+		}
+		if key == "g" {
+			if p.confirmStopID != "" || p.confirmWorktree != "" {
+				p.pendingGUntil = time.Time{}
+				continue
+			}
+			now := time.Now()
+			if !p.pendingGUntil.IsZero() && now.Before(p.pendingGUntil) {
+				p.pendingGUntil = time.Time{}
+				p.jumpSelection(0)
+			} else {
+				p.pendingGUntil = now.Add(navigationKeyTimeout)
+			}
+			continue
+		}
+		p.pendingGUntil = time.Time{}
+		if key == "G" {
+			if p.confirmStopID == "" && p.confirmWorktree == "" {
+				p.jumpSelection(len(p.filtered()) - 1)
 			}
 			continue
 		}

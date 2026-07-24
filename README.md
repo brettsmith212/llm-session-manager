@@ -118,6 +118,19 @@ set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
 `llmux` also maintains the numeric `@llm_waiting_count` option for custom
 status formats. Both values update whenever an agent reports a state change.
 
+When an agent first enters `waiting`, llmux also shows a yellow notification
+for about five seconds on every attached client on the current tmux server,
+except clients attached directly to managed `llm-*` sessions. This means an
+agent in one project can request attention while you work in Neovim in another
+project window. Repeated `waiting` hooks do not repeat the notification; leaving
+and re-entering `waiting` does. The notice uses the task label when available,
+then the project directory name, for example `api-server: Needs Review`.
+
+Notifications use tmux 3.7's non-modal `display-message` behavior so they do
+not change focus, consume input, or create a window. Tmux displays the notice
+in its message/status area; its exact placement follows the user's tmux status
+configuration and cannot be guaranteed to be a top-right corner popup.
+
 ### Control room
 
 Open the control room with `Ctrl+a u`. The left pane manages sessions while
@@ -143,6 +156,8 @@ the right pane is the selected agent's live terminal:
   names do not change.
 - `n` jumps to the next agent that needs attention, even when a filter hides it.
 - `/` searches paths, task labels, branches, agents, and states.
+- `gg` jumps to the first session and `G` jumps to the last session in the
+  current list. A committed search filter limits both jumps to matching sessions.
 - `p` pins the selected session to a **Pinned** section at the top of the
   control room. Pinned sessions stay there regardless of state but keep their
   live `needs you` / `working` / `idle` badge. Press `p` again to unpin. Pin
@@ -152,12 +167,14 @@ the right pane is the selected agent's live terminal:
   second `Ctrl+x` confirmation; idle agents stop immediately.
 
 Sessions are grouped into **Pinned**, **Needs You**, **Active**, and **Idle**
-sections, then by project. The **Pinned** section appears only when one or more
-sessions have been pinned with `p` and stays at the top regardless of state.
-Checkouts from the same Git repository sort together within each
-section, with the primary checkout first and its worktrees ordered by task or
-branch beneath it. The repository, its primary checkout, and worktrees are
-rendered as an indented hierarchy rather than unrelated paths. Git repositories
+sections, then by project recency. The **Pinned** section appears only when one
+or more sessions have been pinned with `p` and stays at the top regardless of
+state. Within each section, repository families and their checkouts sort by the
+most recent state report among their visible sessions. Checkouts from the same
+Git repository remain together; equal recency keeps the primary checkout before
+its worktrees and uses task, branch, and path as deterministic fallbacks. The
+repository, its primary checkout, and worktrees are rendered as an indented
+hierarchy rather than unrelated paths. Git repositories
 show their local branch and compact working-tree summary
 (`main · 3 files · +24 · -6 · ?1`). Clean repositories show `main · clean`;
 non-Git or unavailable directories omit that line. Git reads are local, cached,
