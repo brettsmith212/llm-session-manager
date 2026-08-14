@@ -80,6 +80,41 @@ func TestDisplayFloatingNotificationIsDetachedAndTransient(t *testing.T) {
 	}
 }
 
+func TestRingClientBellsWritesOncePerTTY(t *testing.T) {
+	first, err := os.CreateTemp("", "llmux-bell-first-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := first.Name()
+	_ = first.Close()
+	t.Cleanup(func() { _ = os.Remove(firstPath) })
+
+	second, err := os.CreateTemp("", "llmux-bell-second-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPath := second.Name()
+	_ = second.Close()
+	t.Cleanup(func() { _ = os.Remove(secondPath) })
+
+	RingClientBells([]ClientInfo{
+		{TTY: firstPath},
+		{TTY: firstPath},
+		{TTY: secondPath},
+		{},
+	})
+
+	for _, path := range []string{firstPath, secondPath} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "\a" {
+			t.Fatalf("bell output for %s = %q, want BEL", path, got)
+		}
+	}
+}
+
 func hasPane(paneID string) bool {
 	result := RunRaw([]string{"display-message", "-p", "-t", paneID, "#{pane_id}"})
 	return result.ExitCode == 0 && strings.TrimSpace(result.Stdout) == paneID

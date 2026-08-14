@@ -43,6 +43,24 @@ func TestWaitingNotificationMessage(t *testing.T) {
 	}
 }
 
+func TestChimeEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "true", want: true},
+		{value: "True", want: true},
+		{value: "", want: true},
+		{value: "anything", want: true},
+		{value: "false", want: false},
+		{value: " FALSE ", want: false},
+	} {
+		if got := chimeEnabled(tt.value); got != tt.want {
+			t.Errorf("chimeEnabled(%q) = %v, want %v", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestNotificationWindowsExcludeManagedSessionsAndDeduplicateWindows(t *testing.T) {
 	clients := []tmux.ClientInfo{
 		{Client: "/dev/ttys001", Session: "0", WindowID: "@1", WindowWidth: 120},

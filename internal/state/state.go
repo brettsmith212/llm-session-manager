@@ -80,13 +80,21 @@ func SetState(state types.State) error {
 }
 
 func notifyWaitingClients(prefix string, session types.Session) {
+	clients := tmux.ListClients()
+	if chimeEnabled(tmux.GetGlobalOption("@llm_chime", "true")) {
+		tmux.RingClientBells(clients)
+	}
 	if !tmux.SupportsFloatingPanes() {
 		return
 	}
 	message := waitingNotificationMessage(session)
-	for _, window := range notificationWindows(prefix, tmux.ListClients()) {
+	for _, window := range notificationWindows(prefix, clients) {
 		_, _ = tmux.DisplayFloatingNotification(window.id, window.width, message, waitingNotificationDuration)
 	}
+}
+
+func chimeEnabled(value string) bool {
+	return !strings.EqualFold(strings.TrimSpace(value), "false")
 }
 
 type notificationWindow struct {

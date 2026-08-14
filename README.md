@@ -92,6 +92,7 @@ sessions know which agent to launch.
 | `@llm_popup_width` | `90%` | Width of the popup opened by `launch`/`add`. Any tmux size spec. |
 | `@llm_popup_height` | `90%` | Height of the popup opened by `launch`/`add`. |
 | `@llm_warm_cap` | `5` | Max number of warm-only background sessions. `0` = unlimited. Oldest evicted LRU-style. |
+| `@llm_chime` | `true` | Ring attached tmux clients when an agent enters `waiting`. Set to `false` to disable. |
 | `@llm_worktree_base` | XDG data home (`~/.local/share`) | Parent directory for new isolated checkouts. llmux appends `llmux/worktrees/<repository>-<hash>/<task>`. Existing worktrees are unaffected. |
 | `@llm_worktree_branch_prefix` | `llmux` | Namespace for new worktree branches, such as `brett/patch-one`. Set to `none` for an unprefixed branch such as `patch-one`. |
 | `@llm_parent` | *(unset)* | Target tmux client for popup anchoring. Set automatically by the tmux binding; usually not set manually. |
@@ -101,6 +102,9 @@ A minimal `tmux.conf` block:
 ```tmux
 set -g @llm_command 'opencode'
 set -g @llm_agents 'opencode claude amp'
+
+# Optional; Needs Review chimes are enabled by default.
+set -g @llm_chime 'false'
 
 # Optional: place new isolated checkouts under
 # ~/Developer/llmux/worktrees/<repository>-<hash>/<task>/
@@ -123,15 +127,18 @@ yellow notification for about five seconds in the top-right of every window
 currently displayed by an attached client on the tmux server. Clients attached
 directly to managed `llm-*` sessions are excluded. This means an agent in one
 project can request attention while you work in Neovim in another project
-window. Repeated `waiting` hooks do not repeat the notification; leaving and
-re-entering `waiting` does. A newer notice replaces an existing llmux notice in
-the same window. The text uses the task label when available, then the project
-directory name, for example `api-server: Needs Review`.
+window. Repeated `waiting` hooks do not repeat the notification or chime;
+leaving and re-entering `waiting` does. By default, llmux writes a terminal bell
+to every attached tmux client on macOS and Linux. Whether the bell is audible
+depends on the terminal emulator's bell settings. Set `@llm_chime` to `false`
+to disable it. A newer notice replaces an existing llmux notice in the same
+window. The text uses the task label when available, then the project directory
+name, for example `api-server: Needs Review`.
 
 Notifications use tmux 3.7's non-modal floating panes, so they do not change
 focus, consume input, or create a persistent window or pane. On older tmux
 versions, transient notifications are disabled; Control Room state,
-`@llm_waiting_count`, and `@llm_status` continue to work normally.
+`@llm_waiting_count`, `@llm_status`, and chimes continue to work normally.
 
 ### Control room
 

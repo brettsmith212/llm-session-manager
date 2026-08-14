@@ -3,9 +3,11 @@ package tmux
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -115,6 +117,7 @@ func AttachCommand(name string, clearTmuxEnv bool) string {
 // ClientInfo describes an attached tmux client.
 type ClientInfo struct {
 	Client      string
+	TTY         string
 	Session     string
 	Window      string
 	WindowID    string
@@ -123,27 +126,45 @@ type ClientInfo struct {
 
 // ListClients returns the list of attached clients.
 func ListClients() []ClientInfo {
-	result := RunRaw([]string{"list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_name}\t#{window_id}\t#{window_width}"})
+	result := RunRaw([]string{"list-clients", "-F", "#{client_name}\t#{client_tty}\t#{session_name}\t#{window_name}\t#{window_id}\t#{window_width}"})
 	if result.ExitCode != 0 || result.Stdout == "" {
 		return nil
 	}
 	lines := strings.Split(result.Stdout, "\n")
 	clients := make([]ClientInfo, 0, len(lines))
 	for _, line := range lines {
-		parts := strings.SplitN(line, "\t", 5)
-		if len(parts) != 5 {
+		parts := strings.SplitN(line, "\t", 6)
+		if len(parts) != 6 {
 			continue
 		}
-		width, _ := strconv.Atoi(parts[4])
+		width, _ := strconv.Atoi(parts[5])
 		clients = append(clients, ClientInfo{
 			Client:      parts[0],
-			Session:     parts[1],
-			Window:      parts[2],
-			WindowID:    parts[3],
+			TTY:         parts[1],
+			Session:     parts[2],
+			Window:      parts[3],
+			WindowID:    parts[4],
 			WindowWidth: width,
 		})
 	}
 	return clients
+}
+
+// RingClientBells sends the terminal bell to each attached tmux client.
+func RingClientBells(clients []ClientInfo) {
+	seen := make(map[string]bool)
+	for _, client := range clients {
+		if client.TTY == "" || seen[client.TTY] {
+			continue
+		}
+		seen[client.TTY] = true
+		terminal, err := os.OpenFile(client.TTY, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			continue
+		}
+		_, _ = terminal.Write([]byte{'\a'})
+		_ = terminal.Close()
+	}
 }
 
 // HasSession reports whether a tmux session exists.
