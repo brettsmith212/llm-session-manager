@@ -98,6 +98,8 @@ func BadgeColor(name string) ansi.RGB {
 		return ansi.Peach
 	case "amp":
 		return ansi.Red
+	case "codex":
+		return ansi.Green
 	default:
 		return ansi.Surface2
 	}
