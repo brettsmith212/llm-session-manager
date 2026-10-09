@@ -79,6 +79,18 @@ func SetState(state types.State) error {
 	return statusErr
 }
 
+// SeedIdle marks a newly created agent window idle unless the agent has
+// already reported a state of its own.
+func SeedIdle(window string) error {
+	if tmux.GetWindowOption(window, "@llm_state") != "" {
+		return nil
+	}
+	if err := tmux.SetWindowOption(window, "@llm_state", string(types.Idle)); err != nil {
+		return err
+	}
+	return tmux.SetWindowOption(window, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix()))
+}
+
 func notifyWaitingClients(prefix string, session types.Session) {
 	clients := tmux.ListClients()
 	if chimeEnabled(tmux.GetGlobalOption("@llm_chime", "true")) {

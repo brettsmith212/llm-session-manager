@@ -127,6 +127,39 @@ func TestSetStateNotifiesOnlyOnTransitionToWaiting(t *testing.T) {
 	}
 }
 
+func TestSeedIdleKeepsReportedState(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-state-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _ = runTmux("kill-server") })
+
+	mustTmux(t, "new-session", "-d", "-s", "llm-test", "-n", "codex", "sleep 1000")
+	if err := SeedIdle("llm-test:0"); err != nil {
+		t.Fatalf("SeedIdle: %v", err)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", "llm-test:0", "@llm_state"); got != "idle" {
+		t.Fatalf("seeded state = %q, want idle", got)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", "llm-test:0", "@llm_state_at"); got == "" {
+		t.Fatal("seeded state has no timestamp")
+	}
+
+	mustTmux(t, "set-option", "-w", "-t", "llm-test:0", "@llm_state", "working")
+	if err := SeedIdle("llm-test:0"); err != nil {
+		t.Fatalf("SeedIdle: %v", err)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", "llm-test:0", "@llm_state"); got != "working" {
+		t.Fatalf("state after reseed = %q, want working", got)
+	}
+}
+
 func mustTmux(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("tmux", args...)

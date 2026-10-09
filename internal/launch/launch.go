@@ -6,6 +6,7 @@ import (
 
 	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/sessions"
+	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/tmux"
 )
 
@@ -34,7 +35,7 @@ func Launch(cwd, origin string) error {
 
 	created := false
 	if !tmux.HasSession(sessionName) {
-		if err := tmux.NewSession(sessionName, cwd, command); err != nil {
+		if err := tmux.NewSession(sessionName, cwd, agent.LaunchCommand(command)); err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
 		created = true
@@ -61,6 +62,9 @@ func Launch(cwd, origin string) error {
 	if agentName != "" {
 		_ = tmux.SetWindowOption(window, "@llm_agent", agentName)
 		_ = tmux.RenameWindow(window, agentName)
+		if agent.StartsSilent(agentName) {
+			_ = state.SeedIdle(window)
+		}
 	}
 	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")

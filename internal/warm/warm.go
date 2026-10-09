@@ -45,7 +45,7 @@ func Warm(cwd string) error {
 		evictWarmOnly(prefix, cap)
 	}
 
-	if err := tmux.NewSession(sessionName, cwd, command); err != nil {
+	if err := tmux.NewSession(sessionName, cwd, agent.LaunchCommand(command)); err != nil {
 		return err
 	}
 

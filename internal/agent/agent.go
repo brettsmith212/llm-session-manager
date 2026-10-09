@@ -65,6 +65,29 @@ func Name(command string) string {
 	return filepath.Base(strings.Trim(fields[0], `"'`))
 }
 
+// LaunchCommand returns the command llmux runs to start an agent in a
+// managed window. Codex otherwise hosts sessions in a shared app-server
+// daemon whose lifecycle hooks inherit the TMUX_PANE of whichever pane
+// started the daemon, so each Codex window gets its own embedded server.
+func LaunchCommand(command string) string {
+	if Name(command) != "codex" {
+		return command
+	}
+	for _, field := range strings.Fields(command) {
+		if field == "--no-daemon" {
+			return command
+		}
+	}
+	return command + " --no-daemon"
+}
+
+// StartsSilent reports whether an agent's hooks stay silent until the first
+// prompt. Codex defers even SessionStart to the first turn, so llmux marks
+// new Codex windows idle itself rather than leaving them "starting".
+func StartsSilent(name string) bool {
+	return name == "codex"
+}
+
 // Cycle rotates @llm_active_agent to the next entry in the catalog and
 // returns the new active agent. If the current active agent is not in the
 // catalog (e.g. it was set in tmux.conf but not listed in @llm_agents),

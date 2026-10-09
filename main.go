@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"llm-session-manager/internal/add"
+	"llm-session-manager/internal/codexhook"
 	"llm-session-manager/internal/initcmd"
 	"llm-session-manager/internal/launch"
 	"llm-session-manager/internal/listcmd"
@@ -21,7 +22,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|warm|list|picker|prompt|state|worktree|init>")
+	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|warm|list|picker|prompt|state|codex-hook|worktree|init>")
 	os.Exit(1)
 }
 
@@ -127,6 +128,13 @@ func main() {
 		if err := state.SetState(types.State(args[1])); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+
+	case "codex-hook":
+		// Codex reads stdout and non-zero exits as hook decisions, so state
+		// updates stay best-effort: report failures on stderr and exit 0.
+		if err := codexhook.Run(os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 		}
 
 	case "worktree":

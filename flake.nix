@@ -21,6 +21,7 @@
           claude-plugin = pkgs.callPackage ./claude-plugin.nix { };
           amp-plugin = pkgs.callPackage ./amp-plugin.nix { };
           opencode-plugin = pkgs.callPackage ./opencode-plugin.nix { };
+          codex-plugin = pkgs.callPackage ./codex-plugin.nix { };
         });
 
       overlays = forEachSystem (system: (final: prev: {
@@ -28,6 +29,7 @@
         llmux-claude-plugin = self.packages.${system}.claude-plugin;
         llmux-amp-plugin = self.packages.${system}.amp-plugin;
         llmux-opencode-plugin = self.packages.${system}.opencode-plugin;
+        llmux-codex-plugin = self.packages.${system}.codex-plugin;
       }));
     };
 }

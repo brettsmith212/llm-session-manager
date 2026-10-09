@@ -7,6 +7,7 @@ It pairs with thin plugins that translate agent lifecycle events into `llmux sta
 - **`plugins/claude/`** — Claude Code plugin (this repo)
 - **`plugins/opencode/`** — OpenCode event adapter
 - **`plugins/amp/`** — Amp plugin using its `ThreadState` observable and command palette
+- **`plugins/codex/`** — Codex hooks that feed `llmux codex-hook`
 
 ## Install
 
@@ -57,6 +58,37 @@ xdg.configFile."opencode/plugins/tmux-session-manager.js".source =
   "${inputs.llmux.packages.${pkgs.system}.opencode-plugin}/share/opencode/plugins/tmux-session-manager.js";
 ```
 
+### Install the Codex hooks
+
+```nix
+home.file.".codex/hooks.json".source =
+  "${inputs.llmux.packages.${pkgs.system}.codex-plugin}/share/codex/hooks.json";
+```
+
+Without Nix, copy `plugins/codex/hooks.json` to `~/.codex/hooks.json`, or merge
+its `hooks` entries into an existing file.
+
+Codex skips new or changed hooks until you trust them. After installing (and
+after any update that changes the file), start Codex, run `/hooks`, and trust
+the `llmux codex-hook` entries. Until then Codex shows a startup warning and
+llmux cannot see its state.
+
+Each hook pipes the event's JSON payload to `llmux codex-hook`, which maps it
+to a state: a prompt or tool call is `working`, an approval request or a
+`request_user_input` question is `waiting`, and the end of a turn or an
+interrupt is `idle`.
+
+llmux adjusts Codex in two ways that other agents do not need:
+
+- It starts Codex with `--no-daemon`. Codex otherwise runs sessions inside a
+  shared background server, and hooks inherit that server's `TMUX_PANE`, so
+  every Codex window would report into whichever pane started the server.
+- It marks new Codex windows `idle` itself, because Codex runs no hooks until
+  the first prompt is submitted.
+
+After you approve a command, the window keeps showing `needs you` until that
+command finishes, because Codex has no hook for approval decisions.
+
 ## Build standalone
 
 ```bash
@@ -64,6 +96,7 @@ nix build .#llmux           # the binary
 nix build .#claude-plugin   # the Claude Code plugin
 nix build .#amp-plugin      # the Amp plugin
 nix build .#opencode-plugin # the OpenCode plugin
+nix build .#codex-plugin    # the Codex hooks
 ```
 
 ## Usage
@@ -73,6 +106,7 @@ llmux launch <cwd> <window_id>   # create a session for a new agent
 llmux warm <cwd>                 # pre-warm a session in the background (hidden from picker)
 llmux list                         # open the agent control room
 llmux state <working|waiting|idle> # update session state from a hook
+llmux codex-hook                   # update session state from a Codex hook payload on stdin
 llmux worktree list                # list llmux-owned isolated worktrees
 llmux worktree remove <path>       # safely remove a clean worktree; keep its branch
 ```

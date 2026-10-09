@@ -8,6 +8,7 @@ import (
 
 	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/sessions"
+	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/tmux"
 )
 
@@ -32,7 +33,7 @@ func Add(cwd, origin string, showPopup bool) (string, error) {
 	var windowID string
 	agentName := agent.Name(command)
 	if !tmux.HasSession(sessionName) {
-		result, err := tmux.Run([]string{"new-session", "-dP", "-s", sessionName, "-c", abs, "-F", "#{window_id}", command})
+		result, err := tmux.Run([]string{"new-session", "-dP", "-s", sessionName, "-c", abs, "-F", "#{window_id}", agent.LaunchCommand(command)})
 		if err != nil {
 			return "", fmt.Errorf("failed to create session: %w", err)
 		}
@@ -56,7 +57,7 @@ func Add(cwd, origin string, showPopup bool) (string, error) {
 				agentName = currentCommand
 			}
 		} else {
-			result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", command})
+			result, err := tmux.Run([]string{"new-window", "-dP", "-t", sessionName + ":", "-c", abs, "-F", "#{window_id}", agent.LaunchCommand(command)})
 			if err != nil {
 				return "", fmt.Errorf("failed to create window: %w", err)
 			}
@@ -79,6 +80,9 @@ func Add(cwd, origin string, showPopup bool) (string, error) {
 	}
 
 	_ = tmux.SetWindowOption(windowID, "@llm_agent", agentName)
+	if agent.StartsSilent(agentName) {
+		_ = state.SeedIdle(windowID)
+	}
 	_ = tmux.SetWindowOption(windowID, "@llm_path", abs)
 	_ = tmux.RenameWindow(windowID, agentName)
 	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
