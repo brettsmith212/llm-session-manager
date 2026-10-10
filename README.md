@@ -105,14 +105,6 @@ nix build .#opencode-plugin # the OpenCode plugin
 nix build .#codex-plugin    # the Codex hooks
 ```
 
-## Development
-
-Run the Go test suite from the repository root:
-
-```bash
-go test ./...
-```
-
 ## Usage
 
 ```bash
