@@ -6,6 +6,7 @@
 *.dylib
 *.test
 *.out
+coverage.txt
 vendor/
 go.work
 go.work.sum

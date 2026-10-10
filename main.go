@@ -35,8 +35,7 @@ func main() {
 		usage()
 	}
 
-	command := args[0]
-	switch command {
+	switch args[0] {
 	case "launch":
 		cwd := currentDir()
 		origin := ""
