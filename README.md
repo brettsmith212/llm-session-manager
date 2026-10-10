@@ -28,6 +28,11 @@ llmux = inputs.llmux.packages.${pkgs.system}.default;
 
 ### Install the Claude Code plugin
 
+The plugin routes every Claude Code hook through `llmux claude-hook <state>`.
+The state comes from the hook configuration; the payload Claude passes on stdin
+adds why the agent is waiting, the first prompt (to name the task), and the
+conversation id used to resume it.
+
 ```nix
 home.file.".claude/skills/llm-session-manager" = {
   source = inputs.llmux.packages.${pkgs.system}.claude-plugin;
@@ -76,7 +81,8 @@ llmux cannot see its state.
 Each hook pipes the event's JSON payload to `llmux codex-hook`, which maps it
 to a state: a prompt or tool call is `working`, an approval request or a
 `request_user_input` question is `waiting`, and the end of a turn or an
-interrupt is `idle`.
+interrupt is `idle`. The payload also supplies the command an approval request
+is for, the first prompt (to name the task), and the session id `R` resumes.
 
 llmux adjusts Codex in two ways that other agents do not need:
 
@@ -106,6 +112,7 @@ llmux launch <cwd> <window_id>   # create a session for a new agent
 llmux warm <cwd>                 # pre-warm a session in the background (hidden from picker)
 llmux list                         # open the agent control room
 llmux state <working|waiting|idle> # update session state from a hook
+llmux claude-hook <state>          # record a Claude Code hook; reads its payload on stdin
 llmux codex-hook                   # update session state from a Codex hook payload on stdin
 llmux worktree list                # list llmux-owned isolated worktrees
 llmux worktree remove <path>       # safely remove a clean worktree; keep its branch
@@ -126,7 +133,10 @@ sessions know which agent to launch.
 | `@llm_popup_width` | `90%` | Width of the popup opened by `launch`/`add`. Any tmux size spec. |
 | `@llm_popup_height` | `90%` | Height of the popup opened by `launch`/`add`. |
 | `@llm_warm_cap` | `5` | Max number of warm-only background sessions. `0` = unlimited. Oldest evicted LRU-style. |
-| `@llm_chime` | `true` | Ring attached tmux clients when an agent enters `waiting`. Set to `false` to disable. |
+| `@llm_theme` | `catppuccin-mocha` | Control Room colors: `catppuccin-mocha` or `tokyonight`. Also styles the room's borders and the create popups. |
+| `@llm_notify` | *(unset)* | How an agent asks for you: `bell`, `desktop` (a system notification through the terminal, OSC 9), `both`, or `off`. When unset, `@llm_chime` decides whether the bell rings. |
+| `@llm_chime` | `true` | Ring attached tmux clients when an agent enters `waiting`. Set to `false` to disable. Ignored once `@llm_notify` is set. |
+| `@llm_review_command` | `hunk diff $LLMUX_BASE --watch` when hunk is installed, else a paged `git diff` | Command `d` runs in a popup at the selected checkout. `$LLMUX_BASE` is empty for an ordinary checkout and is the starting commit of an llmux worktree. |
 | `@llm_worktree_base` | XDG data home (`~/.local/share`) | Parent directory for new isolated checkouts. llmux appends `llmux/worktrees/<repository>-<hash>/<task>`. Existing worktrees are unaffected. |
 | `@llm_worktree_branch_prefix` | `llmux` | Namespace for new worktree branches, such as `brett/patch-one`. Set to `none` for an unprefixed branch such as `patch-one`. |
 | `@llm_parent` | *(unset)* | Target tmux client for popup anchoring. Set automatically by the tmux binding; usually not set manually. |
@@ -137,8 +147,14 @@ A minimal `tmux.conf` block:
 set -g @llm_command 'opencode'
 set -g @llm_agents 'opencode claude amp'
 
-# Optional; Needs Review chimes are enabled by default.
-set -g @llm_chime 'false'
+# Optional: match a TokyoNight terminal.
+set -g @llm_theme 'tokyonight'
+
+# Optional: a desktop notification as well as the bell when an agent needs you.
+set -g @llm_notify 'both'
+
+# Optional: what d runs to review a checkout's diff.
+set -g @llm_review_command 'hunk diff $LLMUX_BASE --watch'
 
 # Optional: place new isolated checkouts under
 # ~/Developer/llmux/worktrees/<repository>-<hash>/<task>/
@@ -148,8 +164,8 @@ set -g @llm_worktree_base '~/Developer'
 # Use 'none' if you want branches named only <task>.
 set -g @llm_worktree_branch_prefix 'brett'
 
-# Optional ambient indicator; llmux keeps @llm_status updated and leaves it
-# empty when no sessions need attention.
+# Optional ambient indicator; llmux keeps @llm_status updated, for example
+# "◆ 2 needs you · ✓ 1 done", and leaves it empty when nothing needs you.
 set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
 
 # Ctrl+a y opens (or, inside a popup, closes) the project's agent popup;
@@ -165,9 +181,10 @@ table for `repeat-time`, so keys such as `j`, `k`, or `g` typed right after
 opening the control room would run any repeatable bindings of your own instead
 of reaching the picker.
 
-`llmux` also maintains the numeric `@llm_waiting_count` option for custom
-status formats. Both values are recounted inside tmux whenever an agent changes
-state, and an open control room corrects them if an agent exits while waiting.
+`llmux` also maintains the numeric `@llm_waiting_count` and `@llm_done_count`
+options for custom status formats. They are recounted inside tmux whenever an
+agent changes state, and an open control room corrects them if an agent exits
+while waiting.
 
 On tmux 3.7 or newer, when an agent first enters `waiting`, llmux also shows a
 yellow notification for about five seconds in the top-right of every window
@@ -177,10 +194,14 @@ project can request attention while you work in Neovim in another project
 window. Repeated `waiting` hooks do not repeat the notification or chime;
 leaving and re-entering `waiting` does. By default, llmux writes a terminal bell
 to every attached tmux client on macOS and Linux. Whether the bell is audible
-depends on the terminal emulator's bell settings. Set `@llm_chime` to `false`
-to disable it. A newer notice replaces an existing llmux notice in the same
-window. The text uses the task label when available, then the project directory
-name, for example `api-server: Needs Review`.
+depends on the terminal emulator's bell settings. Set `@llm_notify` to
+`desktop` or `both` for a system notification as well: llmux writes an OSC 9
+sequence straight to the terminal, which Ghostty, iTerm2 and WezTerm show even
+while another app is in front. A newer notice replaces an existing llmux notice
+in the same window. The text names the task, then says why the agent is
+waiting when its hooks report it, for example
+`api-server: Permission · Bash · npm run db:migrate`, and otherwise
+`api-server: Needs Review`.
 
 Notifications use tmux 3.7's non-modal floating panes, so they do not change
 focus, consume input, or create a persistent window or pane. On older tmux
@@ -199,6 +220,10 @@ the right pane is the selected agent's live terminal:
 - `Shift+Enter` also opens the popup when the terminal and tmux modified-key
   configuration distinguish it from Enter; `o` is the portable binding.
 - `r` goes directly to the selected project window for Neovim/diff review.
+- `d` reviews the selected checkout's diff in a popup over the control room,
+  using `@llm_review_command`. For an llmux worktree the review starts where
+  the worktree branched, so commits the agent already made are included.
+  Closing the viewer returns to the room with the same row selected.
 - `a` creates another session and returns to normal navigation with it selected
   and previewed. A creation bar advertises `e` for optional naming; typing is
   never captured implicitly. When the selected project already has a managed
@@ -209,40 +234,66 @@ the right pane is the selected agent's live terminal:
   refuses dirty worktrees, stops every agent sharing it, and keeps its branch.
 - `e` opens the selected session's prominent task-label editor. Labels are
   stored in the tmux window's `@llm_label` option; internal hash-based session
-  names do not change.
-- `n` jumps to the next agent that needs attention, even when a filter hides it.
-- `/` searches paths, task labels, branches, agents, and states.
+  names do not change. An automatic name, when there is one, is the starting
+  text.
+- `n` jumps to the next agent that needs you, even when a filter hides it. When
+  nothing needs you, it visits finished results you have not looked at yet.
+- `/` searches paths, task names, wait reasons, branches, agents, and states.
 - `gg` jumps to the first session and `G` jumps to the last session in the
   current list. A committed search filter limits both jumps to matching sessions.
 - `p` pins the selected session to a **Pinned** section at the top of the
   control room. Pinned sessions stay there regardless of state but keep their
-  live `needs you` / `working` / `idle` badge. Press `p` again to unpin. Pin
-  state lives in the window's `@llm_pinned` option and survives picker restarts
-  and tmux refreshes.
+  live state glyph. Press `p` again to unpin. Pin state lives in the window's
+  `@llm_pinned` option and survives picker restarts and tmux refreshes.
 - `Ctrl+x` stops the selected agent. Working and waiting agents require a
-  second `Ctrl+x` confirmation; idle agents stop immediately.
+  second `Ctrl+x` confirmation; idle and exited agents stop immediately.
+- `R` restarts an agent that exited. Claude and Codex agents resume the
+  conversation they last reported; other agents start fresh.
+- `?` lists every key. The footer only shows the keys for the selected row.
 
-Sessions are grouped into **Pinned**, **Needs You**, **Active**, and **Idle**
-sections, then by project recency. The **Pinned** section appears only when one
-or more sessions have been pinned with `p` and stays at the top regardless of
-state. Within each section, repository families and their checkouts sort by the
-most recent state change among their visible sessions. Agents report on every
-tool call, but only a change of state (for example from working to needs you)
-moves a group, so busy agents do not reshuffle the list. Checkouts from the same
-Git repository remain together; equal recency keeps the primary checkout before
-its worktrees and uses task, branch, and path as deterministic fallbacks. The
-repository, its primary checkout, and worktrees are rendered as an indented
-hierarchy rather than unrelated paths. Git repositories
-show their local branch and compact working-tree summary
-(`main · 3 files · +24 · -6 · ?1`). Clean repositories show `main · clean`;
-non-Git or unavailable directories omit that line. Git reads are local, cached,
-and never fetch from a remote. Multiple agents in the same working directory
-appear as muted `shared checkout` metadata; this becomes a yellow warning only
-when more than one of them is actively working. Within a single checkout
-directory, agents sort by most recent state change first, so the session that
-changed state last surfaces above its older siblings regardless of its tmux
-window index. The relative time on each row is how long the agent has been in
-its current state.
+Sessions are grouped into **Pinned**, **Needs You**, **Active**, **Done**, and
+**Idle** sections, then by project recency. The **Pinned** section appears only
+when one or more sessions have been pinned with `p` and stays at the top
+regardless of state. **Done** holds agents that finished a turn you have not
+looked at yet; a result counts as seen once you open the agent, review its
+diff, or leave it in the live pane for two seconds. Within each section,
+repository families and their checkouts sort by the most recent state change
+among their visible sessions. Agents report on every tool call, but only a
+change of state (for example from working to needs you) moves a group, so busy
+agents do not reshuffle the list. Checkouts from the same Git repository remain
+together; equal recency keeps the primary checkout before its worktrees and
+uses task, branch, and path as deterministic fallbacks.
+
+Each checkout gets one heading line: its path, or for a worktree its
+repository and task (`api-server ⎇ Fix auth retry`), followed on the right by
+its branch and working-tree summary (`main  ±3 +24 −6 ?1`, or `main  clean`).
+llmux worktrees also show the commits made since they branched (`↑2`) and
+`merged` once the branch they started from contains those commits. Non-Git
+directories show no summary. Git reads are local, cached, and never fetch from a
+remote. When more than one agent is actively working in the same checkout, its
+heading warns `⚠ 2 writing`. Within a single checkout, agents sort by most
+recent state change first. Each row shows the task, the agent, and how long it
+has been in its current state; waits turn orange after five minutes and red
+after fifteen.
+
+Rows explain themselves:
+
+- A task without a label is named after its first prompt, shown in italics,
+  for agents whose hooks pass the prompt (Claude Code and Codex).
+- An agent that needs you shows why on the line below: `Permission · Bash ·
+  npm test`, `Question · Which cache?`, `Plan ready · …`, or a red `Error`
+  when a turn failed.
+- An agent that crashes stays on screen as `✕ Exited · status 3` instead of
+  disappearing with its task name (new agent windows set tmux's
+  `remain-on-exit failed`; a clean exit still closes the window). `R` restarts
+  it.
+- Agents that keep printing output stay **working** through long tool calls;
+  only an agent that stops reporting and stops printing for five minutes is
+  shown as idle.
+
+The live pane's title names the agent it shows and, while it waits, why; the
+title turns yellow when the agent needs you, red when it failed, and teal when
+it has an unseen result.
 
 The control room refreshes the moment any agent changes state. Git status is
 read only while the room is on screen, without taking Git's index lock, so it

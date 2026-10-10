@@ -68,6 +68,9 @@ func Add(cwd, origin string, showPopup bool) (string, error) {
 		tmux.SetWindowOptionArgs(windowID, "@llm_path", abs),
 		[]string{"rename-window", "-t", windowID, agentName},
 		tmux.SetSessionOptionArgs(sessionName, "@llm_ever_attached", "1"),
+		// Keep an agent that crashes on screen instead of losing it and its
+		// task name; a clean exit still closes the window.
+		tmux.SetWindowOptionArgs(windowID, "remain-on-exit", "failed"),
 	)
 	if _, err := tmux.Run(tmux.Batch(commands...)); err != nil {
 		return "", err

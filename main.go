@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
+	"golang.org/x/term"
+
 	"llm-session-manager/internal/add"
+	"llm-session-manager/internal/claudehook"
 	"llm-session-manager/internal/codexhook"
 	"llm-session-manager/internal/initcmd"
 	"llm-session-manager/internal/launch"
@@ -21,7 +25,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|warm|list|picker|prompt|state|codex-hook|worktree|init>")
+	fmt.Fprintln(os.Stderr, "Usage: llmux <launch|add|warm|list|picker|prompt|state|claude-hook|codex-hook|worktree|init>")
 	os.Exit(1)
 }
 
@@ -127,6 +131,21 @@ func main() {
 		if err := state.SetState(types.State(args[1])); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+
+	case "claude-hook":
+		// Claude reads exit code 2 from some hooks as "block this action", so
+		// state updates stay best-effort: report failures on stderr and exit 0.
+		if len(args) < 2 || !types.IsState(args[1]) {
+			fmt.Fprintln(os.Stderr, "Usage: llmux claude-hook <working|waiting|idle>")
+			return
+		}
+		var input io.Reader = os.Stdin
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			input = nil
+		}
+		if err := claudehook.Run(types.State(args[1]), input); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 		}
 
 	case "codex-hook":

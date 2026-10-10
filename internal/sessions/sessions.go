@@ -24,11 +24,27 @@ const StaleSeconds = 300
 // for their next poll.
 const ChangedChannel = "llmux-changed"
 
-const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}\t#{pane_current_command}\t#{pane_start_command}\t#{@llm_label}\t#{@llm_pinned}\t#{@llm_seen_at}"
+// windowFormat lists every field the Control Room reads per agent window. Free
+// text (labels, reasons) is stripped of tabs and newlines when it is written,
+// so splitting on tabs stays reliable.
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}\t#{pane_current_command}\t#{pane_start_command}\t#{@llm_label}\t#{@llm_pinned}\t#{@llm_seen_at}\t#{@llm_label_auto}\t#{@llm_reason_kind}\t#{@llm_reason}\t#{@llm_unseen}\t#{window_activity}\t#{pane_dead}\t#{pane_dead_status}\t#{@llm_agent_session}"
+
+// windowFields is the number of tab-separated fields in windowFormat.
+const windowFields = 23
 
 // waitingMarksFormat expands to one "x" for every managed agent window that is
 // waiting, across all sessions.
 const waitingMarksFormat = "#{S:#{W:#{?#{&&:#{@llm_agent},#{==:#{@llm_state},waiting}},x,}}}"
+
+// doneMarksFormat expands to one "x" for every managed agent window that
+// finished a turn the user has not looked at yet.
+const doneMarksFormat = "#{S:#{W:#{?#{&&:#{@llm_agent},#{==:#{@llm_unseen},1}},x,}}}"
+
+// statusFormat is published as @llm_status. It stays empty when nothing needs
+// the user, so embedding it in a status line adds no idle clutter.
+const statusFormat = "#{?#{==:#{@llm_waiting_count},0},,◆ #{@llm_waiting_count} needs you}" +
+	"#{?#{&&:#{!=:#{@llm_waiting_count},0},#{!=:#{@llm_done_count},0}}, · ,}" +
+	"#{?#{==:#{@llm_done_count},0},,✓ #{@llm_done_count} done}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -95,10 +111,11 @@ func FormatPath(path string) string {
 }
 
 // EffectiveState returns the displayed state, downgrading working sessions
-// that have stopped reporting. Every hook refreshes @llm_seen_at, so a busy
-// agent stays "working" even though its state has not changed for a while.
+// that have stopped reporting. Every hook refreshes @llm_seen_at, and agents
+// redraw a spinner while they work, so pane output also counts: a single tool
+// call that runs for longer than StaleSeconds still shows as working.
 func EffectiveState(s types.Session) types.State {
-	lastReport := max(s.SeenAt, s.StateAt)
+	lastReport := max(s.SeenAt, s.StateAt, s.ActivityAt)
 	if s.State == types.Working && lastReport != 0 {
 		age := time.Now().Unix() - lastReport
 		if age > StaleSeconds {
@@ -108,16 +125,17 @@ func EffectiveState(s types.Session) types.State {
 	return s.State
 }
 
-// WaitingStatusCommands recount waiting agents inside tmux and publish the
-// lightweight options used by status bars. Running them in the same command
-// list as a state change keeps concurrent hooks from publishing stale counts.
-// The display value is empty when no sessions are waiting, so embedding
-// #{@llm_status} adds no idle clutter.
+// WaitingStatusCommands recount waiting and finished-but-unseen agents inside
+// tmux and publish the lightweight options used by status bars. Running them
+// in the same command list as a state change keeps concurrent hooks from
+// publishing stale counts.
 func WaitingStatusCommands() [][]string {
 	return [][]string{
 		{"set-option", "-gF", "@llm_waiting_marks", waitingMarksFormat},
 		{"set-option", "-gF", "@llm_waiting_count", "#{n:@llm_waiting_marks}"},
-		{"set-option", "-gF", "@llm_status", "#{?#{==:#{@llm_waiting_count},0},,◆ #{@llm_waiting_count} needs you}"},
+		{"set-option", "-gF", "@llm_done_marks", doneMarksFormat},
+		{"set-option", "-gF", "@llm_done_count", "#{n:@llm_done_marks}"},
+		{"set-option", "-gF", "@llm_status", statusFormat},
 	}
 }
 
@@ -138,6 +156,33 @@ func CountWaiting(all []types.Session) int {
 	return waiting
 }
 
+// CountDone returns how many sessions finished a turn the user has not seen.
+func CountDone(all []types.Session) int {
+	done := 0
+	for _, session := range all {
+		if session.Unseen {
+			done++
+		}
+	}
+	return done
+}
+
+// Clean strips control characters from free text stored in tmux options, so
+// a tab or newline can never break windowFormat parsing, and caps its length.
+func Clean(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if runes := []rune(value); limit > 0 && len(runes) > limit {
+		value = strings.TrimSpace(string(runes[:limit-1])) + "…"
+	}
+	return value
+}
+
 // GetAllSessions fetches all managed agent windows across all managed tmux
 // sessions, sorted by project path, session, then window index.
 func GetAllSessions(prefix string) []types.Session {
@@ -152,7 +197,7 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 15)
+		parts := strings.SplitN(line, "\t", windowFields)
 		if len(parts) < 9 {
 			continue
 		}
@@ -217,18 +262,38 @@ func GetAllSessions(prefix string) []types.Session {
 			}
 		}
 
+		field := func(i int) string {
+			if i < len(parts) {
+				return parts[i]
+			}
+			return ""
+		}
+		number := func(i int) int64 {
+			n, _ := strconv.ParseInt(field(i), 10, 64)
+			return n
+		}
+
 		session := types.Session{
-			Name:        name,
-			WindowID:    windowID,
-			WindowIndex: windowIndex,
-			WindowName:  windowName,
-			Label:       label,
-			State:       state,
-			StateAt:     stateAt,
-			SeenAt:      seenAt,
-			Path:        path,
-			Origin:      origin,
-			Pinned:      pinned,
+			Name:         name,
+			WindowID:     windowID,
+			WindowIndex:  windowIndex,
+			WindowName:   windowName,
+			Label:        label,
+			AutoLabel:    field(15),
+			State:        state,
+			StateAt:      stateAt,
+			SeenAt:       seenAt,
+			ActivityAt:   number(19),
+			Path:         path,
+			Origin:       origin,
+			Pinned:       pinned,
+			Unseen:       field(18) == "1",
+			ReasonKind:   types.ReasonKind(field(16)),
+			Reason:       field(17),
+			Exited:       field(20) == "1",
+			ExitStatus:   int(number(21)),
+			AgentSession: field(22),
+			StartCommand: field(11),
 		}
 		session.DisplayState = EffectiveState(session)
 		sessions = append(sessions, session)

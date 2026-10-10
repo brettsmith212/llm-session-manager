@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 )
@@ -124,18 +125,38 @@ func focusExistingControlRoom(host *tmux.ClientInfo) bool {
 }
 
 func styleCommands(target string) [][]string {
+	theme := ansi.ThemeNamed(tmux.GetGlobalOption(ansi.ThemeOption, ""))
 	commands := [][]string{tmux.SetWindowOptionArgs(target, "@llm_control_room", "1")}
 	borderOpts := [][2]string{
 		{"pane-border-status", "top"},
-		{"pane-border-format", "#{?pane_active,#[fg=#89b4fa bold] ● FOCUSED · #{pane_title} #[default],#[fg=#6c7086]   #{pane_title} #[default]}"},
-		{"pane-border-style", "fg=#6c7086"},             // Catppuccin Overlay0
-		{"pane-active-border-style", "fg=#89b4fa,bold"}, // Catppuccin Blue
+		{"pane-border-format", borderFormat(theme)},
+		{"pane-border-style", "fg=" + ansi.Hex(theme.Faint)},
+		{"pane-active-border-style", "fg=" + ansi.Hex(theme.Accent) + ",bold"},
 		{"pane-border-lines", "heavy"},
 	}
 	for _, option := range borderOpts {
 		commands = append(commands, tmux.SetWindowOptionArgs(target, option[0], option[1]))
 	}
 	return append(commands, []string{"select-pane", "-t", target + ".0", "-T", "CONTROL ROOM"})
+}
+
+// borderFormat titles each pane. The focused pane is marked; otherwise the
+// live pane's title takes the color of the state of the agent it shows,
+// which the picker records in the pane's @llm_preview_state option. Styles
+// use spaces, not commas, because commas separate conditional branches.
+func borderFormat(theme ansi.Theme) string {
+	title := func(color, glyph string) string {
+		return "#[fg=" + color + "] " + glyph + " #{pane_title} #[default]"
+	}
+	byState := title(ansi.Hex(theme.Muted), " ")
+	for _, state := range []struct{ name, glyph, color string }{
+		{"done", "✓", ansi.Hex(theme.Done)},
+		{"error", "✕", ansi.Hex(theme.Error) + " bold"},
+		{"waiting", "◆", ansi.Hex(theme.Attention) + " bold"},
+	} {
+		byState = "#{?#{==:#{@llm_preview_state}," + state.name + "}," + title(state.color, state.glyph) + "," + byState + "}"
+	}
+	return "#{?pane_active," + title(ansi.Hex(theme.Accent)+" bold", "● FOCUSED ·") + "," + byState + "}"
 }
 
 // roomPanes maps the TTY of each control room's live pane to the session that

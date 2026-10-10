@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 
+	"llm-session-manager/internal/hookpayload"
 	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/types"
 )
@@ -19,8 +20,11 @@ import (
 const requestUserInputTool = "request_user_input"
 
 type payload struct {
-	HookEventName string `json:"hook_event_name"`
-	ToolName      string `json:"tool_name"`
+	HookEventName string          `json:"hook_event_name"`
+	ToolName      string          `json:"tool_name"`
+	ToolInput     json.RawMessage `json:"tool_input"`
+	Prompt        string          `json:"prompt"`
+	SessionID     string          `json:"session_id"`
 }
 
 // StateFor maps a Codex hook event to the state it implies. ok is false for
@@ -46,6 +50,27 @@ func StateFor(event, toolName string) (next types.State, ok bool) {
 	return "", false
 }
 
+// ReportFor maps a Codex hook payload to the report it implies. ok is false
+// for events that do not reveal whether Codex is working or needs the user.
+func ReportFor(p payload) (report state.Report, ok bool) {
+	next, ok := StateFor(p.HookEventName, p.ToolName)
+	if !ok {
+		return state.Report{}, false
+	}
+	report = state.Report{State: next, AgentSession: p.SessionID}
+	switch {
+	case p.HookEventName == "UserPromptSubmit":
+		report.Prompt = p.Prompt
+	case p.HookEventName == "PermissionRequest":
+		report.ReasonKind = types.ReasonPermission
+		report.Reason = hookpayload.ToolSummary(p.ToolName, p.ToolInput)
+	case next == types.Waiting && p.ToolName == requestUserInputTool:
+		report.ReasonKind = types.ReasonQuestion
+		report.Reason = hookpayload.Question(p.ToolInput)
+	}
+	return report, true
+}
+
 // Run reads one hook payload and records the state it implies for the
 // current tmux pane.
 func Run(input io.Reader) error {
@@ -53,9 +78,9 @@ func Run(input io.Reader) error {
 	if err := json.NewDecoder(input).Decode(&p); err != nil {
 		return fmt.Errorf("decode codex hook payload: %w", err)
 	}
-	next, ok := StateFor(p.HookEventName, p.ToolName)
+	report, ok := ReportFor(p)
 	if !ok {
 		return nil
 	}
-	return state.SetState(next)
+	return state.Record(report)
 }

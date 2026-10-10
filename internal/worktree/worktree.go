@@ -49,14 +49,18 @@ type Plan struct {
 // Manifest records an llmux-owned worktree independently from tmux so it can
 // still be found and safely removed after the tmux server exits.
 type Manifest struct {
-	Version      int       `json:"version"`
-	Label        string    `json:"label"`
-	Repository   string    `json:"repository"`
-	CommonDir    string    `json:"common_dir"`
-	WorktreePath string    `json:"worktree_path"`
-	Branch       string    `json:"branch"`
-	BaseCommit   string    `json:"base_commit"`
-	CreatedAt    time.Time `json:"created_at"`
+	Version      int    `json:"version"`
+	Label        string `json:"label"`
+	Repository   string `json:"repository"`
+	CommonDir    string `json:"common_dir"`
+	WorktreePath string `json:"worktree_path"`
+	Branch       string `json:"branch"`
+	BaseCommit   string `json:"base_commit"`
+	// BaseBranch is the branch the worktree started from, used to tell when
+	// its work has been merged back. Empty for detached bases and manifests
+	// written before it was recorded.
+	BaseBranch string    `json:"base_branch,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Inspect resolves the repository and committed base represented by path.
@@ -191,6 +195,7 @@ func Create(plan Plan) error {
 		WorktreePath: plan.Path,
 		Branch:       plan.Branch,
 		BaseCommit:   plan.Repository.Head,
+		BaseBranch:   baseBranch(plan.Repository.Branch),
 		CreatedAt:    time.Now(),
 	}
 	if err := writeManifest(manifest); err != nil {
@@ -198,6 +203,15 @@ func Create(plan Plan) error {
 		return err
 	}
 	return nil
+}
+
+// baseBranch returns the branch name to record as a worktree's base, or ""
+// when the source checkout was detached.
+func baseBranch(branch string) string {
+	if strings.HasPrefix(branch, "detached@") {
+		return ""
+	}
+	return branch
 }
 
 // DiscardCreated removes a newly-created worktree and its branch. It is only

@@ -46,6 +46,20 @@ func TestEffectiveStateUsesLatestReport(t *testing.T) {
 	if got := EffectiveState(legacy); got != types.Idle {
 		t.Fatalf("window without a heartbeat = %s, want idle", got)
 	}
+	// A long tool call sends no hooks, but the agent keeps redrawing.
+	longTool := types.Session{State: types.Working, StateAt: stale, SeenAt: stale, ActivityAt: now}
+	if got := EffectiveState(longTool); got != types.Working {
+		t.Fatalf("agent printing output during a long tool call = %s, want working", got)
+	}
+}
+
+func TestCleanKeepsFreeTextOnOneShortLine(t *testing.T) {
+	if got := Clean("fix\tthe\nflaky   test\x7f", 0); got != "fix the flaky test" {
+		t.Fatalf("Clean() = %q", got)
+	}
+	if got := Clean("migrate the session store to redis", 12); got != "migrate the…" {
+		t.Fatalf("Clean(limit) = %q", got)
+	}
 }
 
 func TestFormatPathOnlyShortensTheHomeDirectory(t *testing.T) {

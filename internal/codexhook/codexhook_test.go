@@ -1,6 +1,7 @@
 package codexhook
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -35,6 +36,31 @@ func TestStateFor(t *testing.T) {
 				t.Fatalf("StateFor(%q, %q) = %q, %v; want %q, %v", tt.event, tt.toolName, got, ok, tt.want, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestReportForAddsReasonsPromptsAndSession(t *testing.T) {
+	decode := func(raw string) payload {
+		var p payload
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	report, ok := ReportFor(decode(`{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"exec_command","tool_input":{"command":["bash","-lc","npm test"]}}`))
+	if !ok || report.State != types.Waiting || report.ReasonKind != types.ReasonPermission || report.Reason != "exec_command · npm test" || report.AgentSession != "s1" {
+		t.Fatalf("permission report = %+v, %v", report, ok)
+	}
+	report, _ = ReportFor(decode(`{"hook_event_name":"PreToolUse","tool_name":"request_user_input","tool_input":{"questions":[{"question":"Which port?"}]}}`))
+	if report.ReasonKind != types.ReasonQuestion || report.Reason != "Which port?" {
+		t.Fatalf("question report = %+v", report)
+	}
+	report, _ = ReportFor(decode(`{"hook_event_name":"UserPromptSubmit","prompt":"add rate limiting"}`))
+	if report.State != types.Working || report.Prompt != "add rate limiting" {
+		t.Fatalf("prompt report = %+v", report)
+	}
+	if _, ok := ReportFor(decode(`{"hook_event_name":"SessionStart"}`)); ok {
+		t.Fatal("SessionStart produced a report")
 	}
 }
 

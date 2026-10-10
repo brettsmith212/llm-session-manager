@@ -44,6 +44,9 @@ type gitInfo struct {
 	worktreeLabel   string
 	managedWorktree bool
 	repository      string
+	baseCommit      string // where an llmux worktree started
+	ahead           int    // commits an llmux worktree has made since baseCommit
+	merged          bool   // those commits are on the branch the worktree started from
 }
 
 func gitPathKey(path string) string {
@@ -121,6 +124,8 @@ func inspectGitChecked(path string) (gitInfo, error) {
 		info.managedWorktree = true
 		info.repository = manifest.Repository
 		info.worktreeLabel = manifest.Label
+		info.baseCommit = manifest.BaseCommit
+		inspectWorktreeProgress(path, manifest, &info)
 	}
 	oid := ""
 	for _, line := range strings.Split(status, "\n") {
@@ -165,6 +170,27 @@ func inspectGitChecked(path string) (gitInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// inspectWorktreeProgress counts the commits an llmux worktree has made since
+// it branched, and whether the branch it started from already contains them.
+// An unanswered question leaves the zero value, which shows nothing.
+func inspectWorktreeProgress(path string, manifest worktree.Manifest, info *gitInfo) {
+	if manifest.BaseCommit == "" {
+		return
+	}
+	count, err := runGit(path, "rev-list", "--count", manifest.BaseCommit+"..HEAD")
+	if err != nil {
+		return
+	}
+	info.ahead, _ = strconv.Atoi(count)
+	if info.ahead == 0 || manifest.BaseBranch == "" {
+		return
+	}
+	// merge-base exits 1 when HEAD is not an ancestor, which runGit reports
+	// as an error.
+	_, err = runGit(path, "merge-base", "--is-ancestor", "HEAD", "refs/heads/"+manifest.BaseBranch)
+	info.merged = err == nil
 }
 
 // runGit runs a read-only git command for the Control Room. Agents run git in

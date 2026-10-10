@@ -85,8 +85,11 @@ func Launch(cwd, origin string) error {
 		commands = append(commands,
 			tmux.SetWindowOptionArgs(windowID, "@llm_agent", agentName),
 			tmux.SetWindowOptionArgs(windowID, "@llm_path", cwd),
-			[]string{"rename-window", "-t", windowID, agentName})
+			[]string{"rename-window", "-t", windowID, agentName},
+			// Keep an agent that crashes on screen; a clean exit still closes it.
+			tmux.SetWindowOptionArgs(windowID, "remain-on-exit", "failed"))
 	}
+	commands = append(commands, seenCommands(sessionName)...)
 	if _, err := tmux.Run(tmux.Batch(commands...)); err != nil {
 		return err
 	}
@@ -99,4 +102,20 @@ func Launch(cwd, origin string) error {
 		Height:  height,
 		Command: tmux.AttachCommand(sessionName, false),
 	})
+}
+
+// seenCommands clear the finished-but-unseen mark of the agent window the
+// popup is about to show, recounting the status bar when there was one.
+func seenCommands(sessionName string) [][]string {
+	details, err := tmux.DisplayMessage("#{window_id}\t#{@llm_unseen}", sessionName+":")
+	if err != nil {
+		return nil
+	}
+	window, unseen, _ := strings.Cut(details, "\t")
+	if window == "" || unseen != "1" {
+		return nil
+	}
+	commands := [][]string{{"set-window-option", "-u", "-t", window, "@llm_unseen"}}
+	commands = append(commands, sessions.WaitingStatusCommands()...)
+	return append(commands, []string{"wait-for", "-S", sessions.ChangedChannel})
 }

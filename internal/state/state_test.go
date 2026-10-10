@@ -35,6 +35,16 @@ func TestWaitingNotificationMessage(t *testing.T) {
 			session: types.Session{Name: "llm-#danger\nname"},
 			want:    "llm-#danger name: Needs Review",
 		},
+		{
+			name:    "automatic name and reason",
+			session: types.Session{AutoLabel: "fix flaky test", ReasonKind: types.ReasonPermission, Reason: "Bash · npm test"},
+			want:    "fix flaky test: Permission · Bash · npm test",
+		},
+		{
+			name:    "reason without detail",
+			session: types.Session{Path: "/work/api", ReasonKind: types.ReasonPlan},
+			want:    "api: Plan ready",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,6 +70,115 @@ func TestChimeEnabled(t *testing.T) {
 		if got := chimeEnabled(tt.value); got != tt.want {
 			t.Errorf("chimeEnabled(%q) = %v, want %v", tt.value, got, tt.want)
 		}
+	}
+}
+
+func TestNotifyModeHonorsChimeUntilNotifyIsSet(t *testing.T) {
+	for _, tt := range []struct {
+		notify, chime string
+		want          alertMode
+	}{
+		{"", "true", alertMode{bell: true}},
+		{"", "false", alertMode{}},
+		{"desktop", "true", alertMode{desktop: true}},
+		{"both", "false", alertMode{bell: true, desktop: true}},
+		{"off", "true", alertMode{}},
+		{" Bell ", "false", alertMode{bell: true}},
+	} {
+		if got := notifyMode(tt.notify, tt.chime); got != tt.want {
+			t.Errorf("notifyMode(%q, %q) = %+v, want %+v", tt.notify, tt.chime, got, tt.want)
+		}
+	}
+}
+
+func TestAutoLabel(t *testing.T) {
+	for prompt, want := range map[string]string{
+		"\n  fix the flaky auth test\nthen run CI": "fix the flaky auth test",
+		"/clear": "",
+		"   ":    "",
+		"why does /health return 503 under load when the cache is cold?": "why does /health return 503 under load when the cache is co…",
+	} {
+		if got := AutoLabel(prompt); got != want {
+			t.Errorf("AutoLabel(%q) = %q, want %q", prompt, got, want)
+		}
+	}
+}
+
+func TestRecordKeepsReasonsUnseenMarksAndTaskNames(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-state-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _ = runTmux("kill-server") })
+
+	mustTmux(t, "new-session", "-d", "-s", "llm-test", "-n", "claude", "sleep 1000")
+	mustTmux(t, "set-option", "-t", "llm-test", "@llm_ever_attached", "1")
+	mustTmux(t, "set-option", "-w", "-t", "llm-test:0", "@llm_agent", "claude")
+	window := mustTmux(t, "display-message", "-p", "-t", "llm-test:", "#{window_id}")
+	t.Setenv("TMUX_PANE", mustTmux(t, "display-message", "-p", "-t", "llm-test:", "#{pane_id}"))
+	originalNotify := sendWaitingNotification
+	t.Cleanup(func() { sendWaitingNotification = originalNotify })
+	var notified []types.Session
+	sendWaitingNotification = func(_ string, session types.Session) { notified = append(notified, session) }
+	option := func(name string) string { return mustTmux(t, "show-options", "-wqv", "-t", window, name) }
+	record := func(report Report) {
+		t.Helper()
+		if err := Record(report); err != nil {
+			t.Fatalf("Record(%+v): %v", report, err)
+		}
+	}
+
+	record(Report{State: types.Working, Prompt: "fix the flaky auth test", AgentSession: "conv-1"})
+	if option("@llm_label_auto") != "fix the flaky auth test" || option("@llm_agent_session") != "conv-1" {
+		t.Fatalf("first prompt did not name the task: auto=%q session=%q", option("@llm_label_auto"), option("@llm_agent_session"))
+	}
+	record(Report{State: types.Working, Prompt: "also update the docs"})
+	if option("@llm_label_auto") != "fix the flaky auth test" {
+		t.Fatalf("a later prompt renamed the task to %q", option("@llm_label_auto"))
+	}
+
+	record(Report{State: types.Waiting, ReasonKind: types.ReasonPermission, Reason: "Bash · npm test"})
+	record(Report{State: types.Waiting, ReasonKind: types.ReasonPermission, Reason: "Bash", KeepReason: true})
+	if option("@llm_reason_kind") != "permission" || option("@llm_reason") != "Bash · npm test" {
+		t.Fatalf("reason = %q/%q, want the specific permission reason kept", option("@llm_reason_kind"), option("@llm_reason"))
+	}
+	if len(notified) != 1 || notified[0].Reason != "Bash · npm test" || notified[0].AutoLabel != "fix the flaky auth test" {
+		t.Fatalf("notifications = %+v, want one carrying the reason and task name", notified)
+	}
+
+	record(Report{State: types.Working})
+	if option("@llm_reason_kind")+option("@llm_reason") != "" {
+		t.Fatal("leaving the wait did not forget its reason")
+	}
+	record(Report{State: types.Idle})
+	if option("@llm_unseen") != "1" {
+		t.Fatal("a finished turn was not marked unseen")
+	}
+	if got := mustTmux(t, "show-options", "-gqv", "@llm_status"); got != "✓ 1 done" {
+		t.Fatalf("@llm_status = %q, want one finished result", got)
+	}
+	record(Report{State: types.Waiting})
+	if option("@llm_unseen") != "" {
+		t.Fatal("new activity did not supersede the unseen mark")
+	}
+	if got := mustTmux(t, "show-options", "-gqv", "@llm_status"); got != "◆ 1 needs you" {
+		t.Fatalf("@llm_status = %q, want one waiting agent", got)
+	}
+
+	record(Report{State: types.Idle, NewConversation: true})
+	if option("@llm_label_auto") != "" {
+		t.Fatal("a new conversation kept the previous automatic task name")
+	}
+	mustTmux(t, "set-option", "-w", "-t", window, "@llm_label", "Auth retries")
+	record(Report{State: types.Working, Prompt: "something else"})
+	if option("@llm_label_auto") != "" {
+		t.Fatal("a manual label was shadowed by an automatic one")
 	}
 }
 

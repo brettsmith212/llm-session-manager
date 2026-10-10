@@ -69,7 +69,7 @@ func TestInspectGitLeavesTheIndexToAgents(t *testing.T) {
 
 func TestGitRefreshKeepsMetadataForCheckoutsThatTimedOut(t *testing.T) {
 	p := &picker{
-		previewTimer:  stoppedTimer(t),
+		previewTimer:  testTimer(t),
 		gitRefreshing: true,
 		gitByPath: map[string]gitInfo{
 			"/work/slow": {valid: true, branch: "main", commonDir: "/work/slow/.git"},
@@ -147,7 +147,7 @@ func TestParentClientPrefersTheClientShowingThisRoom(t *testing.T) {
 	}
 }
 
-func stoppedTimer(t *testing.T) *time.Timer {
+func testTimer(t *testing.T) *time.Timer {
 	t.Helper()
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {

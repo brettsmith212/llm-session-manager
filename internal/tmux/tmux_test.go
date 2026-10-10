@@ -87,7 +87,7 @@ func TestDisplayFloatingNotificationIsDetachedAndTransient(t *testing.T) {
 	}
 }
 
-func TestRingClientBellsWritesOncePerTTY(t *testing.T) {
+func TestAlertClientsWritesOncePerTTY(t *testing.T) {
 	first, err := os.CreateTemp("", "llmux-bell-first-")
 	if err != nil {
 		t.Fatal(err)
@@ -104,12 +104,12 @@ func TestRingClientBellsWritesOncePerTTY(t *testing.T) {
 	_ = second.Close()
 	t.Cleanup(func() { _ = os.Remove(secondPath) })
 
-	RingClientBells([]ClientInfo{
+	AlertClients([]ClientInfo{
 		{TTY: firstPath},
 		{TTY: firstPath},
 		{TTY: secondPath},
 		{},
-	})
+	}, true, false, "ignored")
 
 	for _, path := range []string{firstPath, secondPath} {
 		got, err := os.ReadFile(path)
@@ -119,6 +119,24 @@ func TestRingClientBellsWritesOncePerTTY(t *testing.T) {
 		if string(got) != "\a" {
 			t.Fatalf("bell output for %s = %q, want BEL", path, got)
 		}
+	}
+
+	if err := os.WriteFile(firstPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	AlertClients([]ClientInfo{{TTY: firstPath}}, true, true, "api: Permission · Bash · npm test\n")
+	got, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "\a\x1b]9;api: Permission · Bash · npm test \x07"; string(got) != want {
+		t.Fatalf("bell and desktop output = %q, want %q", got, want)
+	}
+}
+
+func TestDesktopNotificationAvoidsConEmuCommands(t *testing.T) {
+	if got := string(DesktopNotification("4;3 agents")); got != "\x1b]9;llmux: 4;3 agents\x07" {
+		t.Fatalf("DesktopNotification() = %q", got)
 	}
 }
 

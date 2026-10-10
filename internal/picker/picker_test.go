@@ -113,7 +113,7 @@ func TestVisibleListRowsKeepSelectionOnScreen(t *testing.T) {
 	}
 }
 
-func TestListRowsGroupByAttentionAndDemoteSharedCheckoutNotice(t *testing.T) {
+func TestListRowsGroupByAttentionWithOneHeaderPerCheckout(t *testing.T) {
 	p := &picker{
 		sessions: []types.Session{
 			{Name: "shared", WindowID: "@1", Path: "/work/shared", State: types.Waiting},
@@ -125,29 +125,31 @@ func TestListRowsGroupByAttentionAndDemoteSharedCheckoutNotice(t *testing.T) {
 		},
 	}
 	rows := p.buildListRows(p.filtered())
-	var text []string
-	warnings := 0
-	spacers := 0
+	var sections []string
+	spacers, checkouts := 0, 0
 	for _, row := range rows {
-		text = append(text, row.text)
-		if row.kind == listRowWarning {
-			warnings++
-		}
-		if row.kind == listRowSpacer {
+		switch row.kind {
+		case listRowSection:
+			name, _ := sectionPresentation(p.palette(), row.section)
+			sections = append(sections, fmt.Sprintf("%s %d", name, row.count))
+		case listRowSpacer:
 			spacers++
+		case listRowCheckout:
+			checkouts++
+			if row.working > 1 {
+				t.Fatalf("checkout reports %d writers, want no warning with one working agent", row.working)
+			}
 		}
 	}
-	joined := strings.Join(text, "|")
-	for _, want := range []string{"NEEDS YOU · 1", "ACTIVE · 1", "IDLE · 1", "main · 2 files · +4 · -1 · shared checkout · 2 agents"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("grouped rows %q do not contain %q", joined, want)
-		}
+	if got := strings.Join(sections, "|"); got != "NEEDS YOU 1|ACTIVE 1|IDLE 1" {
+		t.Fatalf("sections = %q", got)
 	}
-	if warnings != 0 {
-		t.Fatalf("shared-checkout warnings = %d, want none with only one working agent", warnings)
+	if spacers != 2 || checkouts != 3 {
+		t.Fatalf("spacers = %d, checkouts = %d; want 2 spacers and one checkout header per section group", spacers, checkouts)
 	}
-	if spacers != 2 {
-		t.Fatalf("section spacers = %d, want two between three sections", spacers)
+	line := stripANSI(p.checkoutLine(p.filtered()[0], 0, 60))
+	if !strings.Contains(line, "/work/shared") || !strings.Contains(line, "main  ±2 +4 −1") {
+		t.Fatalf("checkout line = %q, want path and compact git summary", line)
 	}
 }
 
@@ -158,10 +160,10 @@ func TestListRowsWarnWhenMultipleAgentsAreActivelySharingCheckout(t *testing.T) 
 	}}
 	warnings := 0
 	for _, row := range p.buildListRows(p.filtered()) {
-		if row.kind == listRowWarning {
+		if row.kind == listRowCheckout && row.working > 1 {
 			warnings++
-			if row.text != "2 agents are active in this checkout" {
-				t.Fatalf("warning = %q", row.text)
+			if line := stripANSI(p.checkoutLine(p.filtered()[row.sessionIndex], row.working, 60)); !strings.Contains(line, "⚠ 2 writing") {
+				t.Fatalf("checkout line = %q, want a two-writer warning", line)
 			}
 		}
 	}
@@ -258,7 +260,7 @@ func TestRepositoryMetadataReorderPreservesSelectedWindow(t *testing.T) {
 	}
 }
 
-func TestListRowsShowRepositoryCheckoutHierarchy(t *testing.T) {
+func TestListRowsNameWorktreesAfterTheirRepository(t *testing.T) {
 	const (
 		original  = "/projects/repository"
 		worktree  = "/worktrees/repository/try-it"
@@ -272,33 +274,30 @@ func TestListRowsShowRepositoryCheckoutHierarchy(t *testing.T) {
 		},
 		gitByPath: map[string]gitInfo{
 			gitPathKey(original): {valid: true, branch: "main", commonDir: commonDir, checkoutPath: original},
-			gitPathKey(worktree): {valid: true, branch: "llmux/try-it", commonDir: commonDir, checkoutPath: worktree, linkedWorktree: true, worktreeLabel: "Try It"},
+			gitPathKey(worktree): {valid: true, branch: "llmux/try-it", commonDir: commonDir, checkoutPath: worktree, linkedWorktree: true, worktreeLabel: "Try It", ahead: 2},
 		},
 	}
 
-	rows := p.buildListRows(p.filtered())
-	want := []struct {
-		kind   listRowKind
-		text   string
-		indent int
-	}{
-		{listRowSection, "ACTIVE · 3", 0},
-		{listRowRepository, original, 2},
-		{listRowProject, "primary checkout", 4},
-		{listRowGit, "main · clean · shared checkout · 2 agents", 6},
-		{listRowSession, "", 6},
-		{listRowSession, "", 6},
-		{listRowProject, "↳ worktree · Try It", 4},
-		{listRowGit, "llmux/try-it · clean", 6},
-		{listRowSession, "", 6},
-	}
+	list := p.filtered()
+	rows := p.buildListRows(list)
+	want := []listRowKind{listRowSection, listRowCheckout, listRowSession, listRowSession, listRowCheckout, listRowSession}
 	if len(rows) != len(want) {
-		t.Fatalf("hierarchy rows = %#v, want %d rows", rows, len(want))
+		t.Fatalf("rows = %#v, want %d rows", rows, len(want))
 	}
-	for i, expected := range want {
-		if rows[i].kind != expected.kind || rows[i].text != expected.text || rows[i].indent != expected.indent {
-			t.Fatalf("hierarchy row %d = %#v, want %#v", i, rows[i], expected)
+	var headings []string
+	for i, row := range rows {
+		if row.kind != want[i] {
+			t.Fatalf("row %d kind = %d, want %d", i, row.kind, want[i])
 		}
+		if row.kind == listRowCheckout {
+			headings = append(headings, stripANSI(p.checkoutLine(list[row.sessionIndex], row.working, 60)))
+		}
+	}
+	if !strings.HasPrefix(headings[0], "  /projects/repository") || !strings.Contains(headings[0], "main  clean") {
+		t.Fatalf("primary checkout heading = %q", headings[0])
+	}
+	if !strings.HasPrefix(headings[1], "  repository ⎇ Try It") || !strings.Contains(headings[1], "clean ↑2") {
+		t.Fatalf("worktree heading = %q", headings[1])
 	}
 }
 
@@ -319,7 +318,7 @@ func TestNextWaitingPreservesFilterWhenNothingNeedsAttention(t *testing.T) {
 			Name: "api", WindowID: "@1", Path: "/work/api", State: types.Idle,
 		}},
 	}
-	captureStdout(t, p.selectNextWaiting)
+	captureStdout(t, p.selectNextAttention)
 	if p.query != "api" {
 		t.Fatalf("query after n with no waiting sessions = %q, want api", p.query)
 	}
@@ -353,8 +352,8 @@ func TestInspectGitReportsBranchDiffAndUntrackedFiles(t *testing.T) {
 	if info.checkoutPath != gitPathKey(repo) || info.commonDir != gitPathKey(filepath.Join(repo, ".git")) || info.linkedWorktree {
 		t.Fatalf("primary checkout identity = %#v", info)
 	}
-	if got := formatGitInfo(info); got != "main · 1 file · +2 · -1 · ?1" {
-		t.Fatalf("formatGitInfo() = %q", got)
+	if got := plain(gitSegments(ansi.ThemeNamed(""), info)); got != "main  ±1 +2 −1 ?1" {
+		t.Fatalf("gitSegments() = %q", got)
 	}
 
 	linkedPath := filepath.Join(t.TempDir(), "linked")
@@ -385,23 +384,24 @@ func TestANSIContentIsClippedWithoutBreakingUTF8(t *testing.T) {
 
 func TestSelectedRowHighlightExtendsBehindBadge(t *testing.T) {
 	frame := newScreenFrame(80, 1)
-	drawItem(frame, types.Session{
+	p := &picker{}
+	p.drawSession(frame, 1, types.Session{
 		Name:        "llm-api",
 		WindowIndex: 0,
 		WindowName:  "claude",
 		State:       types.Idle,
 		Path:        "/work/api",
-	}, 80, true, 1, true, 2)
+	}, 80, true, 6)
 
 	output := captureStdout(t, frame.flush)
-	// The agent badge is the last visible element on the row. The selected
-	// row's background highlight must extend behind it, not reset before it.
+	// The agent badge sits in the right-hand columns. The selected row's
+	// background highlight must extend behind it, not reset before it.
 	marker := strings.LastIndex(output, "claude")
 	if marker < 0 {
 		t.Fatalf("selected row did not render its agent badge: %q", output)
 	}
 	beforeMarker := output[:marker]
-	lastHighlight := strings.LastIndex(beforeMarker, ansi.Background(ansi.Surface0))
+	lastHighlight := strings.LastIndex(beforeMarker, ansi.Background(p.palette().SelectionBg))
 	lastReset := strings.LastIndex(beforeMarker, ansi.Reset)
 	if lastHighlight < lastReset {
 		t.Fatal("selected row reset its background before the agent badge")
@@ -856,6 +856,20 @@ func mustGit(t *testing.T, repo string, args ...string) {
 	}
 }
 
+func stripANSI(value string) string {
+	var out strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\x1b' {
+			for i < len(value) && value[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		out.WriteByte(value[i])
+	}
+	return out.String()
+}
+
 func captureStdout(t *testing.T, write func()) string {
 	t.Helper()
 	reader, writer, err := os.Pipe()
@@ -899,15 +913,15 @@ func TestPinnedSessionsFormTopSectionAboveAttentionSections(t *testing.T) {
 	}
 
 	rows := p.buildListRows(got)
-	var text []string
+	var sections []string
 	for _, row := range rows {
-		text = append(text, row.text)
-	}
-	joined := strings.Join(text, "|")
-	for _, want := range []string{"PINNED · 2", "NEEDS YOU · 1", "ACTIVE · 1"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("section headings %q do not contain %q", joined, want)
+		if row.kind == listRowSection {
+			name, _ := sectionPresentation(p.palette(), row.section)
+			sections = append(sections, fmt.Sprintf("%s %d", name, row.count))
 		}
+	}
+	if joined := strings.Join(sections, "|"); joined != "PINNED 2|NEEDS YOU 1|ACTIVE 1" {
+		t.Fatalf("section headings = %q", joined)
 	}
 	// A pinned session still renders its live state badge, so the pinned idle
 	// session keeps the idle dot rather than being promoted to a working badge.
@@ -1200,7 +1214,7 @@ func TestPinnedSameDirectorySortsByRecencyNotAttention(t *testing.T) {
 	rows := p.buildListRows(got)
 	projectHeadings := 0
 	for _, row := range rows {
-		if row.kind == listRowProject {
+		if row.kind == listRowCheckout {
 			projectHeadings++
 		}
 	}
@@ -1225,10 +1239,10 @@ func TestSharedCheckoutWarningFiresInPinnedWhenNonWorkingLeads(t *testing.T) {
 	rows := p.buildListRows(p.filtered())
 	warnings := 0
 	for _, row := range rows {
-		if row.kind == listRowWarning {
+		if row.kind == listRowCheckout && row.working > 1 {
 			warnings++
-			if row.text != "2 agents are active in this checkout" {
-				t.Fatalf("warning text = %q, want %q", row.text, "2 agents are active in this checkout")
+			if row.working != 2 {
+				t.Fatalf("writers = %d, want 2", row.working)
 			}
 		}
 	}
@@ -1285,5 +1299,152 @@ func TestPinPersistsAcrossSessionRefresh(t *testing.T) {
 	}
 	if got := p.selectedWindowID(); got != windowID {
 		t.Fatalf("selection after refresh = %q, want %q", got, windowID)
+	}
+}
+
+func TestDoneAndExitedAgentsGetTheirOwnPlaces(t *testing.T) {
+	now := time.Now().Unix()
+	p := &picker{sessions: []types.Session{
+		{Name: "idle", WindowID: "@1", Path: "/work/idle", State: types.Idle, StateAt: now},
+		{Name: "done", WindowID: "@2", Path: "/work/done", State: types.Idle, StateAt: now - 30, Unseen: true},
+		{Name: "crashed", WindowID: "@3", Path: "/work/crashed", State: types.Working, StateAt: now - 60, Exited: true, ExitStatus: 3},
+		{Name: "asking", WindowID: "@4", Path: "/work/asking", State: types.Waiting, StateAt: now - 90, ReasonKind: types.ReasonQuestion, Reason: "Which cache?"},
+	}}
+	list := p.filtered()
+	var order, sections []string
+	details := 0
+	for _, session := range list {
+		order = append(order, session.WindowID)
+	}
+	for _, row := range p.buildListRows(list) {
+		switch row.kind {
+		case listRowSection:
+			name, _ := sectionPresentation(p.palette(), row.section)
+			sections = append(sections, fmt.Sprintf("%s %d", name, row.count))
+		case listRowDetail:
+			details++
+		}
+	}
+	if got := strings.Join(sections, "|"); got != "NEEDS YOU 2|DONE 1|IDLE 1" {
+		t.Fatalf("sections = %q", got)
+	}
+	if got := strings.Join(order, " "); got != "@3 @4 @2 @1" {
+		t.Fatalf("order = %q, want exited and waiting first, then done, then idle", got)
+	}
+	if details != 2 {
+		t.Fatalf("detail rows = %d, want the question and the exit status", details)
+	}
+	if footer := stripANSI(p.footerLine(list, 120)); !strings.HasPrefix(footer, " R restart") {
+		t.Fatalf("footer for an exited agent = %q, want R restart first", footer)
+	}
+	if got := liveTitle(list[1]); got != "LIVE AGENT · asking · Question · Which cache? · prefix u returns" {
+		t.Fatalf("liveTitle() = %q", got)
+	}
+}
+
+func TestNextAttentionVisitsNeedsYouBeforeFinishedWork(t *testing.T) {
+	now := time.Now().Unix()
+	p := &picker{
+		previewTimer: testTimer(t),
+		query:        "zzz",
+		sessions: []types.Session{
+			{Name: "done", WindowID: "@1", Path: "/work/done", State: types.Idle, StateAt: now, Unseen: true},
+			{Name: "idle", WindowID: "@2", Path: "/work/idle", State: types.Idle, StateAt: now},
+		},
+	}
+	captureStdout(t, p.selectNextAttention)
+	if got := p.selectedWindowID(); got != "@1" || p.query != "" {
+		t.Fatalf("n selected %q with query %q, want the finished agent and a cleared filter", got, p.query)
+	}
+	p.sessions = append(p.sessions, types.Session{Name: "waiting", WindowID: "@3", Path: "/work/waiting", State: types.Waiting, StateAt: now})
+	captureStdout(t, p.selectNextAttention)
+	if got := p.selectedWindowID(); got != "@3" {
+		t.Fatalf("n selected %q, want the waiting agent before finished work", got)
+	}
+}
+
+func TestResumeCommand(t *testing.T) {
+	tests := []struct {
+		start, id, want string
+	}{
+		{"claude", "abc", "claude --resume 'abc'"},
+		{"claude --model opus --resume 'old' -c", "new", "claude --model opus --resume 'new'"},
+		{"codex --no-daemon", "abc", "codex resume 'abc' --no-daemon"},
+		{"codex resume 'old' --no-daemon", "new", "codex resume 'new' --no-daemon"},
+		{"opencode", "abc", ""},
+		{"claude", "", ""},
+	}
+	for _, tt := range tests {
+		got := resumeCommand(types.Session{StartCommand: tt.start, AgentSession: tt.id})
+		if got != tt.want {
+			t.Errorf("resumeCommand(%q, %q) = %q, want %q", tt.start, tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestReviewCommandPrefersConfiguredThenHunk(t *testing.T) {
+	if got := reviewCommand("nvim -c 'CodeDiff $LLMUX_BASE...'"); got != "nvim -c 'CodeDiff $LLMUX_BASE...'" {
+		t.Fatalf("configured review command = %q", got)
+	}
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+	if got := reviewCommand(""); !strings.HasPrefix(got, "git ") {
+		t.Fatalf("review command without hunk = %q, want git diff", got)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "hunk"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewCommand(""); got != "hunk diff $LLMUX_BASE --watch" {
+		t.Fatalf("review command with hunk = %q", got)
+	}
+}
+
+func TestInspectGitReportsWorktreeCommitsAndMerge(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	repository := t.TempDir()
+	mustGit(t, repository, "init", "-q", "-b", "main")
+	mustGit(t, repository, "config", "user.name", "llmux test")
+	mustGit(t, repository, "config", "user.email", "llmux@example.com")
+	if err := os.WriteFile(filepath.Join(repository, "a.txt"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repository, "add", "a.txt")
+	mustGit(t, repository, "commit", "-qm", "initial")
+
+	source, err := worktree.Inspect(repository, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := worktree.NewPlan(source, "Add retries", worktree.DefaultBranchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worktree.Create(plan); err != nil {
+		t.Fatal(err)
+	}
+	if info := inspectGit(plan.Path); info.ahead != 0 || info.merged || info.baseCommit != source.Head {
+		t.Fatalf("fresh worktree = %+v, want no progress and its base commit", info)
+	}
+
+	for _, name := range []string{"b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(plan.Path, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, plan.Path, "add", name)
+		mustGit(t, plan.Path, "commit", "-qm", "add "+name)
+	}
+	if info := inspectGit(plan.Path); info.ahead != 2 || info.merged {
+		t.Fatalf("worktree with two commits = ahead %d merged %v, want 2 and not merged", info.ahead, info.merged)
+	}
+	mustGit(t, repository, "merge", "-q", "--ff-only", plan.Branch)
+	info := inspectGit(plan.Path)
+	if !info.merged {
+		t.Fatalf("worktree after merge = %+v, want merged", info)
+	}
+	if got := plain(gitSegments(ansi.ThemeNamed(""), info)); got != "clean ↑2 merged" {
+		t.Fatalf("worktree summary = %q", got)
 	}
 }

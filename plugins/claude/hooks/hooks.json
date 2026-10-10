@@ -5,14 +5,14 @@
       {
         "matcher": "startup|resume|clear",
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "idle"], "timeout": 5 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "working"], "timeout": 5 }
         ]
       }
     ],
@@ -20,49 +20,49 @@
       {
         "matcher": "AskUserQuestion|ExitPlanMode",
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "waiting"], "timeout": 5 }
         ]
       }
     ],
     "PostToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "working"], "timeout": 5 }
         ]
       }
     ],
     "PostToolUseFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "working"], "timeout": 5 }
         ]
       }
     ],
     "SubagentStart": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "working"], "timeout": 5 }
         ]
       }
     ],
     "PermissionRequest": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "waiting"], "timeout": 5 }
         ]
       }
     ],
     "Elicitation": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "waiting"], "timeout": 5 }
         ]
       }
     ],
     "ElicitationResult": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "working"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "working"], "timeout": 5 }
         ]
       }
     ],
@@ -70,34 +70,34 @@
       {
         "matcher": "permission_prompt|elicitation_dialog|agent_needs_input",
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "waiting"], "timeout": 5 }
         ]
       },
       {
         "matcher": "idle_prompt",
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "idle"], "timeout": 5 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "idle"], "timeout": 5 }
         ]
       }
     ],
     "StopFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "waiting"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "waiting"], "timeout": 5 }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "llmux", "args": ["state", "idle"], "timeout": 5 }
+          { "type": "command", "command": "llmux", "args": ["claude-hook", "idle"], "timeout": 5 }
         ]
       }
     ]

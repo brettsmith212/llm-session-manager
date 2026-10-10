@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"llm-session-manager/internal/ansi"
 	llmuxtmux "llm-session-manager/internal/tmux"
 )
 
@@ -247,4 +248,16 @@ func runTmux(args ...string) (string, error) {
 	cmd := exec.Command("tmux", args...)
 	output, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(output)), err
+}
+
+func TestBorderFormatColorsTheLivePaneByState(t *testing.T) {
+	format := borderFormat(ansi.ThemeNamed("tokyonight"))
+	for _, want := range []string{"FOCUSED", "#{==:#{@llm_preview_state},waiting}", "#e0af68 bold] ◆", "#{==:#{@llm_preview_state},error}", "#{==:#{@llm_preview_state},done}"} {
+		if !strings.Contains(format, want) {
+			t.Fatalf("border format %q does not contain %q", format, want)
+		}
+	}
+	if strings.Contains(format, ",bold") {
+		t.Fatal("a comma inside a style would split the conditional")
+	}
 }

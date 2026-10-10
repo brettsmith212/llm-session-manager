@@ -39,7 +39,8 @@ func RunWorktree(defaultPath, origin string) error {
 	defer fmt.Print(ansi.ShowCursor)
 
 	reader := bufio.NewReader(os.Stdin)
-	renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
+	theme := currentChrome().theme
+	renderWorktreePrompt(theme, repository, task, branchPrefix, cursor, errMsg, creating)
 	for {
 		keys, err := readKey(reader)
 		if err != nil {
@@ -60,7 +61,7 @@ func RunWorktree(defaultPath, origin string) error {
 			}
 			creating = true
 			errMsg = ""
-			renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
+			renderWorktreePrompt(theme, repository, task, branchPrefix, cursor, errMsg, creating)
 			if err := submitWorktree(plan, origin); err != nil {
 				creating = false
 				errMsg = err.Error()
@@ -99,55 +100,51 @@ func RunWorktree(defaultPath, origin string) error {
 			cursor += len(keys)
 			errMsg = ""
 		}
-		renderWorktreePrompt(repository, task, branchPrefix, cursor, errMsg, creating)
+		renderWorktreePrompt(theme, repository, task, branchPrefix, cursor, errMsg, creating)
 	}
 }
 
-func renderWorktreePrompt(repository worktree.Repository, task, branchPrefix string, cursor int, errMsg string, creating bool) {
+func renderWorktreePrompt(theme ansi.Theme, repository worktree.Repository, task, branchPrefix string, cursor int, errMsg string, creating bool) {
 	cols, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		cols = 80
 	}
 	fmt.Print(ansi.ClearScreen)
 
-	writeLine(2, cols, fmt.Sprintf("  %s%sCreate isolated worktree agent%s",
-		ansi.Foreground(ansi.Blue), ansi.Bold, ansi.Reset))
-	writeLine(4, cols, fmt.Sprintf("  %sRepository:%s %s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset, repository.Name))
-	writeLine(5, cols, fmt.Sprintf("  %sBase:%s       %s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset, repository.Branch))
-
+	header(1, cols, theme, "NEW WORKTREE AGENT", ansi.Foreground(theme.Muted)+repository.Name+" ")
+	writeLine(3, cols, fmt.Sprintf("  %sTask%s", ansi.Foreground(theme.Faint), ansi.Reset))
 	before := task[:cursor]
 	after := task[cursor:]
-	writeLine(7, cols, fmt.Sprintf("  %sTask:%s       %s%s%s_%s%s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset,
-		ansi.Foreground(ansi.Text), before,
-		ansi.Foreground(ansi.Blue), ansi.Foreground(ansi.Text), after+ansi.Reset))
+	band(4, cols, theme.SelectionBg, fmt.Sprintf("%s  › %s%s%s█%s%s%s",
+		ansi.Foreground(theme.Accent), ansi.Foreground(theme.Text), before,
+		ansi.Foreground(theme.Accent), ansi.Foreground(theme.Text), after, ansi.Reset))
 
 	slug := worktree.Slug(task)
 	if strings.TrimSpace(task) == "" {
 		slug = "<task>"
 	}
 	destination := filepath.Join(repository.StorageDir, slug)
-	writeLine(9, cols, fmt.Sprintf("  %sBranch:%s     %s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset, worktree.BranchName(branchPrefix, slug)))
-	writeLine(10, cols, fmt.Sprintf("  %sCreates:%s    %s",
-		ansi.Foreground(ansi.Overlay0), ansi.Reset, shortenHome(destination)))
+	field := func(row int, name string, value string, valueColor ansi.RGB) {
+		writeLine(row, cols, fmt.Sprintf("  %s%-13s%s%s%s", ansi.Foreground(theme.Faint), name, ansi.Foreground(valueColor), value, ansi.Reset))
+	}
+	field(6, "Starts from", repository.Branch, theme.Branch)
+	field(7, "Branch", worktree.BranchName(branchPrefix, slug), theme.Branch)
+	field(8, "Checkout", shortenHome(destination), theme.Muted)
 
-	row := 12
+	row := 10
 	if repository.Dirty {
-		writeLine(row, cols, fmt.Sprintf("  %s⚠ Source has uncommitted changes; worktree starts from committed HEAD.%s",
-			ansi.Foreground(ansi.Yellow), ansi.Reset))
+		writeLine(row, cols, fmt.Sprintf("  %s⚠ Uncommitted changes stay behind; the worktree starts from the last commit.%s",
+			ansi.Foreground(theme.Attention), ansi.Reset))
 		row++
 	}
-	if errMsg != "" {
-		writeLine(row, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Red), errMsg, ansi.Reset))
-	} else if creating {
-		writeLine(row, cols, fmt.Sprintf("  %sCreating worktree and starting agent…%s",
-			ansi.Foreground(ansi.Blue), ansi.Reset))
-	} else {
-		writeLine(row, cols, fmt.Sprintf("  %sEnter create · Esc cancel · branch is retained on cleanup%s",
-			ansi.Foreground(ansi.Overlay0), ansi.Reset))
+	switch {
+	case errMsg != "":
+		writeLine(row, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(theme.Error), errMsg, ansi.Reset))
+	case creating:
+		writeLine(row, cols, fmt.Sprintf("  %sCreating worktree and starting agent…%s", ansi.Foreground(theme.Accent), ansi.Reset))
+	default:
+		writeLine(row, cols, keyHints(theme, [][2]string{{"⏎", "create"}, {"^U", "clear"}, {"esc", "cancel"}})+
+			ansi.Foreground(theme.Faint)+"branch is kept on cleanup"+ansi.Reset)
 	}
 }
 

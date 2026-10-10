@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"llm-session-manager/internal/add"
+	"llm-session-manager/internal/agent"
 	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/tmux"
 )
@@ -39,7 +41,8 @@ func Run(defaultPath, origin string) error {
 	defer fmt.Print(ansi.ShowCursor)
 
 	reader := bufio.NewReader(os.Stdin)
-	render(path, cursor, errMsg)
+	look := currentChrome()
+	render(look, path, cursor, errMsg)
 
 	for {
 		keys, err := readKey(reader)
@@ -49,24 +52,39 @@ func Run(defaultPath, origin string) error {
 		if done := handleKey(keys, &path, &cursor, &errMsg, origin, oldState); done {
 			return nil
 		}
-		render(path, cursor, errMsg)
+		render(look, path, cursor, errMsg)
 	}
 }
 
-func render(path string, cursor int, errMsg string) {
-	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		cols, rows = 80, 24
-	}
+// chrome is what prompts read from tmux once, so typing costs no tmux calls.
+type chrome struct {
+	theme ansi.Theme
+	agent string
+}
 
+func currentChrome() chrome {
+	return chrome{
+		theme: ansi.ThemeNamed(tmux.GetGlobalOption(ansi.ThemeOption, "")),
+		agent: agent.Name(agent.Active()),
+	}
+}
+
+func render(look chrome, path string, cursor int, errMsg string) {
+	cols, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		cols = 80
+	}
+	theme := look.theme
 	fmt.Print(ansi.ClearScreen)
 
-	const title = "  Create new agent"
-	const label = "  Create in: "
-	const help = "  Enter to create  ·  task label follows  ·  Ctrl-C cancel  ·  Ctrl-T fzf"
+	right := ""
+	if look.agent != "" {
+		right = ansi.Foreground(theme.Muted) + "new " + ansi.Foreground(theme.Agent(look.agent)) + look.agent + " "
+	}
+	header(1, cols, theme, "NEW AGENT", right)
+	writeLine(3, cols, fmt.Sprintf("  %sDirectory%s", ansi.Foreground(theme.Faint), ansi.Reset))
 
-	writeLine(2, cols, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Blue)+ansi.Bold, title, ansi.Reset))
-
+	const label = "  › "
 	maxPathWidth := cols - len(label) - 2
 	start, end := windowAroundCursor(path, cursor, maxPathWidth)
 	display := path[start:end]
@@ -84,21 +102,66 @@ func render(path string, cursor int, errMsg string) {
 	if displayCursor < len(display) {
 		after = display[displayCursor:]
 	}
-
-	prompt := fmt.Sprintf("%s%s%s%s%s%s%s",
-		label,
-		ansi.Foreground(ansi.Text), before,
-		ansi.Foreground(ansi.Blue), "_",
-		ansi.Foreground(ansi.Text), after+ansi.Reset)
-	writeLine(4, cols, prompt)
+	band(4, cols, theme.SelectionBg, fmt.Sprintf("%s%s%s%s%s█%s%s%s",
+		ansi.Foreground(theme.Accent), label,
+		ansi.Foreground(theme.Text), before,
+		ansi.Foreground(theme.Accent),
+		ansi.Foreground(theme.Text), after, ansi.Reset))
 
 	if errMsg != "" {
-		writeLine(6, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(ansi.Red), errMsg, ansi.Reset))
+		writeLine(6, cols, fmt.Sprintf("  %s%s%s", ansi.Foreground(theme.Error), errMsg, ansi.Reset))
 	} else {
-		writeLine(6, cols, fmt.Sprintf("%s%s%s", ansi.Foreground(ansi.Overlay0), help, ansi.Reset))
+		writeLine(6, cols, keyHints(theme, [][2]string{{"⏎", "create"}, {"tab", "complete"}, {"^T", "fzf"}, {"^U", "clear"}, {"esc", "cancel"}}))
 	}
+}
 
-	_ = rows
+// header draws the room-style title band with optional right-aligned text.
+func header(row, cols int, theme ansi.Theme, title, right string) {
+	left := fmt.Sprintf("%s ▌ %s%s%s%s", ansi.Foreground(theme.Accent), ansi.Foreground(theme.Text), ansi.Bold, title, ansi.Reset)
+	content := left
+	if right != "" {
+		gap := cols - visibleWidth(left) - visibleWidth(right)
+		if gap > 0 {
+			content += strings.Repeat(" ", gap) + right + ansi.Reset
+		}
+	}
+	band(row, cols, theme.HeaderBg, content)
+}
+
+// band draws a full-width line on a background color.
+func band(row, cols int, background ansi.RGB, content string) {
+	bg := ansi.Background(background)
+	fmt.Print(ansi.CursorPos(row, 1) + ansi.ClearLine() + bg + strings.Repeat(" ", max(0, cols)) +
+		ansi.CursorPos(row, 1) + bg + strings.ReplaceAll(content, ansi.Reset, ansi.Reset+bg) + ansi.Reset)
+}
+
+// keyHints renders "key label" pairs the way the room's footer does.
+func keyHints(theme ansi.Theme, pairs [][2]string) string {
+	var out strings.Builder
+	out.WriteString("  ")
+	for _, pair := range pairs {
+		out.WriteString(ansi.Foreground(theme.Subtext) + ansi.Bold + pair[0] + ansi.Reset)
+		out.WriteString(ansi.Foreground(theme.Faint) + " " + pair[1] + "  " + ansi.Reset)
+	}
+	return out.String()
+}
+
+// visibleWidth counts the cells a string with SGR sequences occupies.
+func visibleWidth(value string) int {
+	width := 0
+	for i := 0; i < len(value); {
+		if value[i] == '\x1b' {
+			for i < len(value) && value[i] != 'm' {
+				i++
+			}
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(value[i:])
+		i += size
+		width++
+	}
+	return width
 }
 
 func windowAroundCursor(path string, cursor, maxWidth int) (int, int) {

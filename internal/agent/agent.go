@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"llm-session-manager/internal/ansi"
 	"llm-session-manager/internal/tmux"
 )
 
@@ -108,24 +107,6 @@ func Cycle() string {
 	}
 	_ = tmux.SetGlobalOption("@llm_active_agent", next)
 	return next
-}
-
-// BadgeColor returns the ANSI color associated with an agent name. Known
-// agents get a stable color; unknown agents fall back to a muted neutral
-// so the badge still reads but doesn't compete for attention.
-func BadgeColor(name string) ansi.RGB {
-	switch name {
-	case "opencode":
-		return ansi.Blue
-	case "claude":
-		return ansi.Peach
-	case "amp":
-		return ansi.Red
-	case "codex":
-		return ansi.Green
-	default:
-		return ansi.Surface2
-	}
 }
 
 // ErrNotConfigured is returned by callers that need an agent command and

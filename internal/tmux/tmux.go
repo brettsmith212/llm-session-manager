@@ -216,8 +216,21 @@ func ListClients() []ClientInfo {
 	return clients
 }
 
-// RingClientBells sends the terminal bell to each attached tmux client.
-func RingClientBells(clients []ClientInfo) {
+// AlertClients rings the terminal bell and/or posts a desktop notification on
+// each attached client's terminal, once per TTY. Writing to the client TTY
+// reaches the outer terminal directly, so tmux passthrough settings do not
+// matter.
+func AlertClients(clients []ClientInfo, bell, desktop bool, message string) {
+	if !bell && !desktop {
+		return
+	}
+	var payload []byte
+	if bell {
+		payload = append(payload, '\a')
+	}
+	if desktop {
+		payload = append(payload, DesktopNotification(message)...)
+	}
 	seen := make(map[string]bool)
 	for _, client := range clients {
 		if client.TTY == "" || seen[client.TTY] {
@@ -228,9 +241,27 @@ func RingClientBells(clients []ClientInfo) {
 		if err != nil {
 			continue
 		}
-		_, _ = terminal.Write([]byte{'\a'})
+		// One write keeps the sequence together on the terminal.
+		_, _ = terminal.Write(payload)
 		_ = terminal.Close()
 	}
+}
+
+// DesktopNotification returns the OSC 9 sequence that Ghostty, iTerm2,
+// WezTerm and other terminals turn into a system notification.
+func DesktopNotification(message string) []byte {
+	clean := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, message)
+	// A body that starts with a number followed by ";" reads as a ConEmu
+	// command (OSC 9;4 is a progress bar) in terminals that support those.
+	if clean != "" && clean[0] >= '0' && clean[0] <= '9' {
+		clean = "llmux: " + clean
+	}
+	return []byte("\x1b]9;" + clean + "\x07")
 }
 
 // HasSession reports whether a tmux session exists.
