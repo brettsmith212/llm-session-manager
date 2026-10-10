@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"llm-session-manager/internal/add"
@@ -328,7 +329,19 @@ func submit(path, origin string) error {
 	return nil
 }
 
+// escapeSequenceDelay is how long a lone Escape waits for the rest of a
+// possible escape sequence. Tmux may hold the second byte briefly while it
+// decides whether the key is bound.
+const escapeSequenceDelay = 100 * time.Millisecond
+
 func readKey(reader *bufio.Reader) (string, error) {
+	return readKeyFrom(reader, int(os.Stdin.Fd()))
+}
+
+// readKeyFrom reads one key press from reader, which wraps fd. Go cannot set
+// read deadlines on a terminal, so a lone Escape is told apart from an escape
+// sequence by waiting for more input with select(2).
+func readKeyFrom(reader *bufio.Reader, fd int) (string, error) {
 	b, err := reader.ReadByte()
 	if err != nil {
 		return "", err
@@ -336,42 +349,52 @@ func readKey(reader *bufio.Reader) (string, error) {
 
 	var buf strings.Builder
 	buf.WriteByte(b)
-
-	// If this looks like the start of an escape sequence, try to read the rest.
-	if b == '\x1b' {
-		// Read the byte after ESC with a generous deadline. Tmux may hold
-		// the second byte briefly while it decides whether the key is bound.
-		_ = os.Stdin.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		next, err := reader.ReadByte()
-		_ = os.Stdin.SetReadDeadline(time.Time{})
-		if err != nil {
-			return buf.String(), nil
-		}
-		buf.WriteByte(next)
-
-		// ESC + printable byte (not [ or O) is a simple Alt+<key>. Return
-		// immediately so Alt-C and friends feel snappy.
-		if next != '[' && next != 'O' {
-			return buf.String(), nil
-		}
-
-		// CSI / SS3 sequence: keep reading until the final byte.
-		_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-		for {
-			next, err := reader.ReadByte()
-			_ = os.Stdin.SetReadDeadline(time.Time{})
-			if err != nil {
-				break
-			}
-			buf.WriteByte(next)
-			if next >= 0x40 && next <= 0x7e {
-				break
-			}
-			_ = os.Stdin.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-		}
+	if b != '\x1b' || !waitReadable(reader, fd, escapeSequenceDelay) {
+		return buf.String(), nil
 	}
 
+	next, err := reader.ReadByte()
+	if err != nil {
+		return buf.String(), nil
+	}
+	buf.WriteByte(next)
+
+	// ESC + printable byte (not [ or O) is a simple Alt+<key>. Return
+	// immediately so Alt-C and friends feel snappy.
+	if next != '[' && next != 'O' {
+		return buf.String(), nil
+	}
+
+	// CSI / SS3 sequence: keep reading until the final byte.
+	for waitReadable(reader, fd, 20*time.Millisecond) {
+		next, err := reader.ReadByte()
+		if err != nil {
+			break
+		}
+		buf.WriteByte(next)
+		if next >= 0x40 && next <= 0x7e {
+			break
+		}
+	}
 	return buf.String(), nil
+}
+
+// waitReadable reports whether input is available within timeout. It uses
+// select(2) rather than poll(2) because macOS poll does not support terminals.
+func waitReadable(reader *bufio.Reader, fd int, timeout time.Duration) bool {
+	if reader.Buffered() > 0 {
+		return true
+	}
+	for {
+		var readable unix.FdSet
+		readable.Set(fd)
+		tv := unix.NsecToTimeval(timeout.Nanoseconds())
+		n, err := unix.Select(fd+1, &readable, nil, nil, &tv)
+		if err == unix.EINTR {
+			continue
+		}
+		return err == nil && n > 0
+	}
 }
 
 func runFZF(currentPath string, oldState *term.State) (string, error) {

@@ -7,7 +7,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/tmux"
 	"llm-session-manager/internal/types"
 )
@@ -125,6 +127,99 @@ func TestSetStateNotifiesOnlyOnTransitionToWaiting(t *testing.T) {
 	if got := mustTmux(t, "show-options", "-gqv", "@llm_waiting_count"); got != "1" {
 		t.Fatalf("waiting count = %q, want 1", got)
 	}
+}
+
+func TestSetStateHeartbeatKeepsTransitionTimeAndSignalsOnlyChanges(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llm-state-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _ = runTmux("kill-server") })
+
+	mustTmux(t, "new-session", "-d", "-s", "llm-test", "-n", "claude", "sleep 1000")
+	mustTmux(t, "set-option", "-t", "llm-test", "@llm_ever_attached", "1")
+	window := mustTmux(t, "display-message", "-p", "-t", "llm-test:", "#{window_id}")
+	t.Setenv("TMUX_PANE", mustTmux(t, "display-message", "-p", "-t", "llm-test:", "#{pane_id}"))
+	originalNotify := sendWaitingNotification
+	t.Cleanup(func() { sendWaitingNotification = originalNotify })
+	sendWaitingNotification = func(string, types.Session) {}
+
+	if err := SetState(types.Working); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", window, "@llm_agent"); got != "1" {
+		t.Fatalf("first report did not mark the window as managed: @llm_agent=%q", got)
+	}
+	mustTmux(t, "set-option", "-w", "-t", window, "@llm_state_at", "100")
+	mustTmux(t, "set-option", "-w", "-t", window, "@llm_seen_at", "100")
+	// Nothing was waiting when that first change signalled, so tmux holds the
+	// wake for the next waiter. Consume it.
+	mustTmux(t, "wait-for", sessions.ChangedChannel)
+
+	// Repeating a state only refreshes the heartbeat, so the time shown and
+	// sorted on stays the moment the agent started working.
+	waiter := startWaiter(t)
+	if err := SetState(types.Working); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", window, "@llm_state_at"); got != "100" {
+		t.Fatalf("@llm_state_at = %q after a repeated state, want 100", got)
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", window, "@llm_seen_at"); got == "100" || got == "" {
+		t.Fatalf("@llm_seen_at = %q, want a refreshed heartbeat", got)
+	}
+	select {
+	case <-waiter:
+		t.Fatal("a repeated state woke Control Rooms")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := SetState(types.Waiting); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waiter:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a state change did not wake Control Rooms")
+	}
+	if got := mustTmux(t, "show-options", "-wqv", "-t", window, "@llm_state_at"); got == "100" {
+		t.Fatal("@llm_state_at was not updated by a state change")
+	}
+	if got := mustTmux(t, "show-options", "-gqv", "@llm_status"); got != "◆ 1 needs you" {
+		t.Fatalf("@llm_status = %q, want one waiting agent", got)
+	}
+	if err := SetState(types.Idle); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustTmux(t, "show-options", "-gqv", "@llm_waiting_count") + "|" + mustTmux(t, "show-options", "-gqv", "@llm_status"); got != "0|" {
+		t.Fatalf("waiting count|status = %q, want 0 and an empty status", got)
+	}
+}
+
+// startWaiter blocks on the Control Room change channel in the background.
+func startWaiter(t *testing.T) <-chan struct{} {
+	t.Helper()
+	cmd := exec.Command("tmux", "wait-for", sessions.ChangedChannel)
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	woken := make(chan struct{})
+	go func() {
+		if cmd.Wait() == nil {
+			close(woken)
+		}
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	// Give tmux a moment to register the waiter before anything signals.
+	time.Sleep(100 * time.Millisecond)
+	return woken
 }
 
 func TestSeedIdleKeepsReportedState(t *testing.T) {

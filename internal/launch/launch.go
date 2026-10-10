@@ -8,6 +8,7 @@ import (
 	"llm-session-manager/internal/sessions"
 	"llm-session-manager/internal/state"
 	"llm-session-manager/internal/tmux"
+	"llm-session-manager/internal/warm"
 )
 
 // Launch creates or reuses a session for cwd and opens it in a popup.
@@ -31,46 +32,31 @@ func Launch(cwd, origin string) error {
 		return nil
 	}
 
+	cwd = sessions.CanonicalPath(cwd)
 	sessionName := sessions.SessionNameForPath(cwd, prefix)
 
-	created := false
-	if !tmux.HasSession(sessionName) {
-		if err := tmux.NewSession(sessionName, cwd, agent.LaunchCommand(command)); err != nil {
-			return fmt.Errorf("failed to create session: %w", err)
-		}
-		created = true
-	}
-
-	// Promote the session: visible in the picker, protected from warm
+	// Promote a warm-only session: visible in the picker, protected from warm
 	// eviction, window named correctly. An established session keeps the
 	// identity of the agent it is already running; the globally active agent
 	// only controls newly created sessions.
-	window := sessionName + ":0"
+	windowID := ""
 	agentName := ""
-	if created {
-		agentName = agent.Name(command)
-	} else if tmux.GetSessionOption(sessionName, "@llm_ever_attached") == "" {
-		agentName = tmux.GetWindowOption(window, "@llm_warm_agent")
-		if agentName == "" {
-			startCommand, _ := tmux.DisplayMessage("#{pane_start_command}", window)
-			agentName = agent.Name(startCommand)
+	if tmux.HasSession(sessionName) && tmux.GetSessionOption(sessionName, "@llm_ever_attached") == "" {
+		claimed, ok, err := warm.Claim(sessionName, agent.Name(command))
+		if err != nil {
+			return err
 		}
-		if agentName == "" {
-			agentName, _ = tmux.DisplayMessage("#{pane_current_command}", window)
+		if ok {
+			windowID, agentName = claimed.WindowID, claimed.Agent
 		}
 	}
-	if agentName != "" {
-		_ = tmux.SetWindowOption(window, "@llm_agent", agentName)
-		_ = tmux.RenameWindow(window, agentName)
-		if agent.StartsSilent(agentName) {
-			_ = state.SeedIdle(window)
+	if !tmux.HasSession(sessionName) {
+		created, err := tmux.Run([]string{"new-session", "-dP", "-F", "#{window_id}",
+			"-s", sessionName, "-c", cwd, agent.LaunchCommand(command)})
+		if err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
 		}
-	}
-	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
-	_ = tmux.SetSessionOption(sessionName, "@llm_ever_attached", "1")
-
-	if err := tmux.SetSessionOption(sessionName, "@llm_path", cwd); err != nil {
-		return err
+		windowID, agentName = created, agent.Name(command)
 	}
 
 	// Prefer the session we're actually running in (already resolved above
@@ -87,15 +73,30 @@ func Launch(cwd, origin string) error {
 	if strings.HasPrefix(originSession, "@") {
 		originSession = ""
 	}
+
+	commands := [][]string{
+		tmux.SetSessionOptionArgs(sessionName, "@llm_path", cwd),
+		tmux.SetSessionOptionArgs(sessionName, "@llm_ever_attached", "1"),
+	}
 	if originSession != "" && originSession != sessionName {
-		if err := tmux.SetSessionOption(sessionName, "@llm_origin", originSession); err != nil {
-			return err
-		}
+		commands = append(commands, tmux.SetSessionOptionArgs(sessionName, "@llm_origin", originSession))
+	}
+	if windowID != "" && agentName != "" {
+		commands = append(commands,
+			tmux.SetWindowOptionArgs(windowID, "@llm_agent", agentName),
+			tmux.SetWindowOptionArgs(windowID, "@llm_path", cwd),
+			[]string{"rename-window", "-t", windowID, agentName})
+	}
+	if _, err := tmux.Run(tmux.Batch(commands...)); err != nil {
+		return err
+	}
+	if windowID != "" && agent.StartsSilent(agentName) {
+		_ = state.SeedIdle(windowID)
 	}
 
 	return tmux.DisplayPopup(tmux.DisplayPopupOptions{
 		Width:   width,
 		Height:  height,
-		Command: fmt.Sprintf("tmux attach-session -t %s", sessionName),
+		Command: tmux.AttachCommand(sessionName, false),
 	})
 }

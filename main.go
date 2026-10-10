@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"llm-session-manager/internal/add"
@@ -162,13 +161,13 @@ func main() {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			if samePath(currentDir(), owned.WorktreePath) {
+			if worktree.Within(currentDir(), owned.WorktreePath) {
 				fmt.Fprintln(os.Stderr, "run worktree removal from outside the checkout being removed")
 				os.Exit(1)
 			}
 			prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
 			for _, session := range sessions.GetAllSessions(prefix) {
-				if samePath(session.Path, owned.WorktreePath) {
+				if worktree.Within(session.Path, owned.WorktreePath) {
 					fmt.Fprintln(os.Stderr, "worktree still has an active agent; use D in the Control Room or stop it first")
 					os.Exit(1)
 				}
@@ -176,7 +175,7 @@ func main() {
 			panes := tmux.RunRaw([]string{"list-panes", "-a", "-F", "#{pane_current_path}"})
 			if panes.ExitCode == 0 {
 				for _, panePath := range strings.Split(panes.Stdout, "\n") {
-					if samePath(panePath, owned.WorktreePath) {
+					if worktree.Within(panePath, owned.WorktreePath) {
 						fmt.Fprintln(os.Stderr, "worktree is still open in a tmux pane; close it before removing the checkout")
 						os.Exit(1)
 					}
@@ -214,15 +213,4 @@ func currentDir() string {
 		return "."
 	}
 	return cwd
-}
-
-func samePath(left, right string) bool {
-	leftAbs, leftErr := filepath.Abs(left)
-	rightAbs, rightErr := filepath.Abs(right)
-	if leftErr == nil && rightErr == nil && filepath.Clean(leftAbs) == filepath.Clean(rightAbs) {
-		return true
-	}
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
-	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }

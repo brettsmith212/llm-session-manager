@@ -95,7 +95,9 @@ export const TmuxSessionManager = async ({ $ }: { $: any }) => {
         case 'session.error': {
           if (!sessionID) break
           active.delete(sessionID)
-          failed.add(sessionID)
+          // Interrupting a turn arrives as an error too, but the user is
+          // already at the keyboard; OpenCode's own TUI ignores it the same way.
+          if (properties.error?.name !== 'MessageAbortedError') failed.add(sessionID)
           await publish()
           break
         }

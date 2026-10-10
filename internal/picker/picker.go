@@ -2,11 +2,13 @@ package picker
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,7 @@ const (
 	pickerSelectionOption = "@llm_picker_selection"
 	worktreeHostOption    = "@llm_worktree_host"
 	previewDelay          = 75 * time.Millisecond
+	refreshInterval       = 2 * time.Second
 	gitRefreshInterval    = 4 * time.Second
 	navigationKeyTimeout  = 500 * time.Millisecond
 )
@@ -38,19 +41,19 @@ func Run() error {
 	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
 	parent := tmux.GetGlobalOption("@llm_parent", "")
 
-	sess := sessions.GetAllSessions(prefix)
-	_ = sessions.PublishWaitingStatus(sess)
 	p := &picker{
 		prefix:        prefix,
 		parent:        parent,
-		sessions:      sess,
+		sessions:      sessions.GetAllSessions(prefix),
 		query:         "",
 		selectedIndex: 0,
 		isSearching:   false,
 		popupClosed:   make(chan struct{}, 1),
-		gitUpdated:    make(chan map[string]gitInfo, 1),
+		gitUpdated:    make(chan gitRefresh, 1),
 		gitByPath:     make(map[string]gitInfo),
 	}
+	p.refreshRoom()
+	p.syncWaitingStatus()
 	p.previewTimer = time.NewTimer(time.Hour)
 	if !p.previewTimer.Stop() {
 		<-p.previewTimer.C
@@ -70,8 +73,15 @@ func Run() error {
 	signal.Notify(resize, syscall.SIGWINCH)
 	defer signal.Stop(resize)
 
-	ticker := time.NewTicker(2 * time.Second)
+	// Agent hooks signal state changes, so the poll only needs to catch what
+	// produces no signal: agents exiting, stale heartbeats and relative times.
+	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changed := make(chan struct{}, 1)
+	go watchChanges(ctx, changed)
 
 	input := make(chan string, 16)
 	go readInput(input)
@@ -81,42 +91,21 @@ func Run() error {
 	if first := p.filtered(); len(first) > 0 {
 		p.updatePreview(first[0])
 	}
-	p.requestGitRefresh()
-
-	lastSnapshot := p.snapshot()
+	// The room may not be on screen yet while ListCommand switches to it, so
+	// the first git refresh ignores visibility.
+	p.requestGitRefresh(true)
+	p.lastSnapshot = p.snapshot()
 
 	for {
 		select {
 		case <-ticker.C:
-			next := sessions.GetAllSessions(prefix)
-			_ = sessions.PublishWaitingStatus(next)
-			p.replaceSessions(next)
-			selectedCreated := p.selectCreatedSession()
-			snap := p.snapshot()
-			if snap != lastSnapshot || selectedCreated {
-				lastSnapshot = snap
-				p.render()
-				if len(p.filtered()) == 0 {
-					p.cancelPreview()
-				}
-			}
-			if visible := p.filtered(); !selectedCreated && p.selectedIndex < len(visible) && visible[p.selectedIndex].WindowID != p.previewWindowID {
-				p.queuePreview(visible[p.selectedIndex])
-			}
-			p.requestGitRefresh()
+			p.refresh(false)
+		case <-changed:
+			p.refresh(false)
 		case <-p.popupClosed:
-			p.replaceSessions(sessions.GetAllSessions(prefix))
-			p.selectCreatedSession()
-			lastSnapshot = p.snapshot()
-			p.render()
-			p.requestGitRefresh()
-		case info := <-p.gitUpdated:
-			selectedID := p.selectedWindowID()
-			p.gitByPath = info
-			p.restoreSelectedWindow(selectedID)
-			p.gitRefreshing = false
-			p.lastGitRefresh = time.Now()
-			p.render()
+			p.refresh(true)
+		case result := <-p.gitUpdated:
+			p.applyGitRefresh(result)
 		case <-resize:
 			p.render()
 		case <-p.previewTimer.C:
@@ -125,6 +114,98 @@ func Run() error {
 			if done := p.handleKeys(keys); done {
 				return nil
 			}
+		}
+	}
+}
+
+// refresh reloads sessions and room state from tmux, redrawing only when
+// something visible changed. force redraws unconditionally.
+func (p *picker) refresh(force bool) {
+	p.refreshRoom()
+	p.replaceSessions(sessions.GetAllSessions(p.prefix))
+	p.syncWaitingStatus()
+	selectedCreated := p.selectCreatedSession()
+	snap := p.snapshot()
+	if force || snap != p.lastSnapshot || selectedCreated {
+		p.lastSnapshot = snap
+		p.render()
+		if len(p.filtered()) == 0 {
+			p.cancelPreview()
+		}
+	}
+	if p.roomPanes == 1 {
+		// The live pane closed, for example because its agent exited. Forget
+		// the old preview so the selected agent is shown in a new pane.
+		p.previewWindowID = ""
+	}
+	if visible := p.filtered(); !selectedCreated && p.selectedIndex < len(visible) && visible[p.selectedIndex].WindowID != p.previewWindowID {
+		p.queuePreview(visible[p.selectedIndex])
+	}
+	p.requestGitRefresh(false)
+}
+
+// roomInfoFormat reads, in one round trip, the control room's own window and
+// the options the picker displays or reacts to.
+const roomInfoFormat = "#{window_id}\t#{window_panes}\t#{window_active_clients}\t#{@llm_waiting_count}\t#{@llm_picker_selection}\t#{@llm_active_agent}\t#{@llm_command}"
+
+func (p *picker) refreshRoom() {
+	target := os.Getenv("TMUX_PANE")
+	if target == "" {
+		target = windowName
+	}
+	result := tmux.RunRaw([]string{"display-message", "-p", "-t", target, roomInfoFormat})
+	if result.ExitCode != 0 {
+		return
+	}
+	parts := strings.SplitN(result.Stdout, "\t", 7)
+	if len(parts) != 7 {
+		return
+	}
+	p.ownWindowID = parts[0]
+	p.roomPanes, _ = strconv.Atoi(parts[1])
+	// An unreadable client count must not stop git refreshes for good.
+	clients, err := strconv.Atoi(parts[2])
+	p.roomVisible = err != nil || clients > 0
+	p.publishedWaiting = parts[3]
+	p.pendingSelection = parts[4]
+	p.activeAgent = parts[5]
+	if p.activeAgent == "" {
+		p.activeAgent = parts[6]
+	}
+}
+
+// syncWaitingStatus republishes the status-bar count when it disagrees with
+// the sessions on screen, for example after a waiting agent exited without
+// reporting. Hooks keep it current otherwise.
+func (p *picker) syncWaitingStatus() {
+	want := strconv.Itoa(sessions.CountWaiting(p.sessions))
+	if p.publishedWaiting == want {
+		return
+	}
+	if sessions.PublishWaitingStatus() == nil {
+		p.publishedWaiting = want
+	}
+}
+
+// watchChanges wakes the picker whenever an agent hook signals a state change.
+func watchChanges(ctx context.Context, changed chan<- struct{}) {
+	for ctx.Err() == nil {
+		result := tmux.RunContext(ctx, []string{"wait-for", sessions.ChangedChannel})
+		if ctx.Err() != nil {
+			return
+		}
+		if result.ExitCode != 0 {
+			// The regular poll keeps the room current until tmux answers again.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+		select {
+		case changed <- struct{}{}:
+		default:
 		}
 	}
 }
@@ -154,105 +235,141 @@ type picker struct {
 	pendingPreview    types.Session
 	hasPendingPreview bool
 	previewWindowID   string
-	gitUpdated        chan map[string]gitInfo
+	gitUpdated        chan gitRefresh
 	gitByPath         map[string]gitInfo
 	gitRefreshing     bool
 	lastGitRefresh    time.Time
 	pendingGUntil     time.Time
+	lastSnapshot      string
+	pathKeys          map[string]string // session path → gitPathKey, reset on each refresh
+
+	// Read from tmux on every refresh by refreshRoom.
+	ownWindowID      string
+	roomPanes        int
+	roomVisible      bool
+	publishedWaiting string
+	pendingSelection string
+	activeAgent      string
 }
 
 func (p *picker) filtered() []types.Session {
 	terms := strings.Fields(strings.ToLower(p.query))
-	out := make([]types.Session, 0, len(p.sessions))
+	// Sort keys are computed once per session rather than inside the
+	// comparator, which runs O(n log n) times on every keypress.
+	type entry struct {
+		session  types.Session
+		section  int
+		state    int
+		order    repositoryOrder
+		family   familyRecencyKey
+		checkout checkoutRecencyKey
+	}
+	entries := make([]entry, 0, len(p.sessions))
 	for _, s := range p.sessions {
-		_, stateLabel, _ := statePresentation(sessionState(s))
-		branch := ""
-		if info, ok := p.gitByPath[gitPathKey(s.Path)]; ok {
-			branch = info.branch
-		}
-		haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s %s %s",
-			s.Path, s.Name, s.WindowName, s.Label, branch, stateLabel))
-		matches := true
-		for _, term := range terms {
-			if !strings.Contains(haystack, term) {
-				matches = false
-				break
+		info := p.gitByPath[p.pathKey(s.Path)]
+		if len(terms) > 0 {
+			_, stateLabel, _ := statePresentation(sessionState(s))
+			haystack := strings.ToLower(strings.Join([]string{
+				s.Path, s.Name, s.WindowName, s.Label, info.branch, stateLabel}, " "))
+			if !containsAll(haystack, terms) {
+				continue
 			}
 		}
-		if matches {
-			out = append(out, s)
-		}
+		e := entry{session: s, section: sectionRank(s), state: stateRank(sessionState(s))}
+		// A session without git metadata gets the zero gitInfo and sorts by path.
+		e.order = repositoryOrderFor(s.Path, info)
+		e.family = familyRecencyKey{section: e.section, family: e.order.family}
+		e.checkout = checkoutRecencyKey{familyRecencyKey: e.family, path: e.order.path}
+		entries = append(entries, e)
 	}
 	familyRecency := make(map[familyRecencyKey]int64)
 	checkoutRecency := make(map[checkoutRecencyKey]int64)
-	for _, session := range out {
-		order := p.repositoryOrder(session)
-		familyKey := familyRecencyKey{section: sectionRank(session), family: order.family}
-		checkoutKey := checkoutRecencyKey{familyRecencyKey: familyKey, path: order.path}
-		if session.StateAt > familyRecency[familyKey] {
-			familyRecency[familyKey] = session.StateAt
+	for _, e := range entries {
+		if e.session.StateAt > familyRecency[e.family] {
+			familyRecency[e.family] = e.session.StateAt
 		}
-		if session.StateAt > checkoutRecency[checkoutKey] {
-			checkoutRecency[checkoutKey] = session.StateAt
+		if e.session.StateAt > checkoutRecency[e.checkout] {
+			checkoutRecency[e.checkout] = e.session.StateAt
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		leftRank := sectionRank(out[i])
-		rightRank := sectionRank(out[j])
-		if leftRank != rightRank {
-			return leftRank < rightRank
+	sort.SliceStable(entries, func(i, j int) bool {
+		left, right := entries[i], entries[j]
+		if left.section != right.section {
+			return left.section < right.section
 		}
-		leftOrder := p.repositoryOrder(out[i])
-		rightOrder := p.repositoryOrder(out[j])
-		leftFamilyKey := familyRecencyKey{section: leftRank, family: leftOrder.family}
-		rightFamilyKey := familyRecencyKey{section: rightRank, family: rightOrder.family}
-		if familyRecency[leftFamilyKey] != familyRecency[rightFamilyKey] {
-			return familyRecency[leftFamilyKey] > familyRecency[rightFamilyKey]
+		if familyRecency[left.family] != familyRecency[right.family] {
+			return familyRecency[left.family] > familyRecency[right.family]
 		}
-		if leftOrder.family != rightOrder.family {
-			return leftOrder.family < rightOrder.family
+		if left.order.family != right.order.family {
+			return left.order.family < right.order.family
 		}
-		leftCheckoutKey := checkoutRecencyKey{familyRecencyKey: leftFamilyKey, path: leftOrder.path}
-		rightCheckoutKey := checkoutRecencyKey{familyRecencyKey: rightFamilyKey, path: rightOrder.path}
-		if checkoutRecency[leftCheckoutKey] != checkoutRecency[rightCheckoutKey] {
-			return checkoutRecency[leftCheckoutKey] > checkoutRecency[rightCheckoutKey]
+		if checkoutRecency[left.checkout] != checkoutRecency[right.checkout] {
+			return checkoutRecency[left.checkout] > checkoutRecency[right.checkout]
 		}
-		if leftOrder.linkedWorktree != rightOrder.linkedWorktree {
-			return !leftOrder.linkedWorktree
+		if left.order.linkedWorktree != right.order.linkedWorktree {
+			return !left.order.linkedWorktree
 		}
-		if leftOrder.checkout != rightOrder.checkout {
-			return leftOrder.checkout < rightOrder.checkout
+		if left.order.checkout != right.order.checkout {
+			return left.order.checkout < right.order.checkout
 		}
-		if leftOrder.path != rightOrder.path {
-			return leftOrder.path < rightOrder.path
+		if left.order.path != right.order.path {
+			return left.order.path < right.order.path
 		}
-		// Sessions sharing a checkout directory sort by most-recently-updated
-		// first, so the agent that reported a state change last surfaces above
+		// Sessions sharing a checkout directory sort by most-recent state
+		// change first, so the agent that changed state last surfaces above
 		// its older siblings regardless of tmux window index. This applies
 		// within every section, including PINNED, where it keeps project
 		// groups contiguous rather than splitting them by attention rank.
-		if out[i].StateAt != out[j].StateAt {
-			return out[i].StateAt > out[j].StateAt
+		if left.session.StateAt != right.session.StateAt {
+			return left.session.StateAt > right.session.StateAt
 		}
 		// Attention rank is only a tiebreaker for sessions with identical
 		// timestamps. Non-pinned sections already group by state via
 		// sectionRank, so this only matters inside the mixed-state PINNED
 		// section when two pinned sessions in the same directory share a
 		// StateAt value.
-		leftState := stateRank(sessionState(out[i]))
-		rightState := stateRank(sessionState(out[j]))
-		if leftState != rightState {
-			return leftState < rightState
+		if left.state != right.state {
+			return left.state < right.state
 		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
+		if left.session.Name != right.session.Name {
+			return left.session.Name < right.session.Name
 		}
-		if out[i].WindowIndex != out[j].WindowIndex {
-			return out[i].WindowIndex < out[j].WindowIndex
+		if left.session.WindowIndex != right.session.WindowIndex {
+			return left.session.WindowIndex < right.session.WindowIndex
 		}
-		return out[i].WindowID < out[j].WindowID
+		return left.session.WindowID < right.session.WindowID
 	})
+	out := make([]types.Session, len(entries))
+	for i, e := range entries {
+		out[i] = e.session
+	}
 	return out
+}
+
+func containsAll(haystack string, terms []string) bool {
+	for _, term := range terms {
+		if !strings.Contains(haystack, term) {
+			return false
+		}
+	}
+	return true
+}
+
+// pathKey memoizes gitPathKey, which resolves symlinks with a syscall per path
+// component, for the current set of sessions.
+func (p *picker) pathKey(path string) string {
+	if path == "" {
+		return ""
+	}
+	if key, ok := p.pathKeys[path]; ok {
+		return key
+	}
+	key := gitPathKey(path)
+	if p.pathKeys == nil {
+		p.pathKeys = make(map[string]string)
+	}
+	p.pathKeys[path] = key
+	return key
 }
 
 type familyRecencyKey struct {
@@ -272,11 +389,10 @@ type repositoryOrder struct {
 	path           string
 }
 
-func (p *picker) repositoryOrder(session types.Session) repositoryOrder {
-	path := strings.ToLower(filepath.Clean(session.Path))
+func repositoryOrderFor(sessionPath string, info gitInfo) repositoryOrder {
+	path := strings.ToLower(filepath.Clean(sessionPath))
 	order := repositoryOrder{family: path, checkout: path, path: path}
-	info, ok := p.gitByPath[gitPathKey(session.Path)]
-	if !ok || info.commonDir == "" {
+	if info.commonDir == "" {
 		return order
 	}
 
@@ -334,6 +450,8 @@ func (p *picker) selectedWindowID() string {
 
 func (p *picker) replaceSessions(next []types.Session) {
 	selectedID := p.selectedWindowID()
+	// Re-resolve paths on every refresh so a changed symlink is picked up.
+	p.pathKeys = nil
 	for i := range next {
 		if !types.IsState(string(next[i].DisplayState)) {
 			next[i].DisplayState = sessions.EffectiveState(next[i])
@@ -356,14 +474,21 @@ func (p *picker) restoreSelectedWindow(selectedID string) {
 	p.selectedIndex = max(0, min(p.selectedIndex, len(list)-1))
 }
 
-func (p *picker) requestGitRefresh() {
-	if p.gitUpdated == nil || p.gitRefreshing || time.Since(p.lastGitRefresh) < gitRefreshInterval {
+// requestGitRefresh starts a background git inspection of every session's
+// checkout. Unless force is set it is rate limited and skipped while no client
+// is looking at the room, since a backgrounded room would otherwise run git
+// in every project all day.
+func (p *picker) requestGitRefresh(force bool) {
+	if p.gitUpdated == nil || p.gitRefreshing {
+		return
+	}
+	if !force && (!p.roomVisible || time.Since(p.lastGitRefresh) < gitRefreshInterval) {
 		return
 	}
 	seen := make(map[string]bool)
 	paths := make([]string, 0, len(p.sessions))
 	for _, session := range p.sessions {
-		key := gitPathKey(session.Path)
+		key := p.pathKey(session.Path)
 		if key == "" || seen[key] {
 			continue
 		}
@@ -376,6 +501,26 @@ func (p *picker) requestGitRefresh() {
 	}()
 }
 
+// applyGitRefresh installs fresh git metadata. Checkouts whose inspection
+// timed out keep their previous metadata, so a busy machine does not make
+// sessions jump in and out of their repository groups.
+func (p *picker) applyGitRefresh(result gitRefresh) {
+	for key := range result.failed {
+		if previous, ok := p.gitByPath[key]; ok {
+			result.info[key] = previous
+		}
+	}
+	p.gitRefreshing = false
+	p.lastGitRefresh = time.Now()
+	if reflect.DeepEqual(p.gitByPath, result.info) {
+		return
+	}
+	selectedID := p.selectedWindowID()
+	p.gitByPath = result.info
+	p.restoreSelectedWindow(selectedID)
+	p.render()
+}
+
 type pathActivity struct {
 	total   int
 	working int
@@ -384,7 +529,7 @@ type pathActivity struct {
 func (p *picker) pathActivity() map[string]pathActivity {
 	activity := make(map[string]pathActivity)
 	for _, session := range p.sessions {
-		if key := gitPathKey(session.Path); key != "" {
+		if key := p.pathKey(session.Path); key != "" {
 			value := activity[key]
 			value.total++
 			if sessionState(session) == types.Working {
@@ -424,10 +569,13 @@ func truncateVisible(str, prefix, suffix string, maxVisible int) string {
 	return string(runes[:avail-1]) + "…"
 }
 
+// snapshot summarizes everything the list displays. It includes the current
+// minute so relative times such as "5m" keep advancing on an idle screen.
 func (p *picker) snapshot() string {
-	parts := make([]string, len(p.sessions))
+	parts := make([]string, len(p.sessions)+1)
+	parts[0] = fmt.Sprintf("%d:%s", time.Now().Unix()/60, p.activeAgent)
 	for i, s := range p.sessions {
-		parts[i] = fmt.Sprintf("%s:%s:%d:%s:%s:%d:%s:%s:%s:%t", s.Name, s.WindowID, s.WindowIndex, s.State, sessionState(s), s.StateAt, s.Path, s.WindowName, s.Label, s.Pinned)
+		parts[i+1] = fmt.Sprintf("%s:%s:%d:%s:%s:%d:%s:%s:%s:%t", s.Name, s.WindowID, s.WindowIndex, s.State, sessionState(s), s.StateAt, s.Path, s.WindowName, s.Label, s.Pinned)
 	}
 	return strings.Join(parts, "|")
 }
@@ -463,7 +611,7 @@ func (p *picker) render() {
 	if waiting > 0 {
 		header += fmt.Sprintf("  %s◆ %d needs you%s", ansi.Foreground(ansi.Yellow), waiting, ansi.Reset)
 	}
-	active := agent.Active()
+	active := p.activeAgent
 	if active == "" {
 		header += fmt.Sprintf("  %sagent %snot configured%s", ansi.Foreground(ansi.Overlay0), ansi.Foreground(ansi.Red), ansi.Reset)
 	} else {
@@ -557,13 +705,14 @@ func (p *picker) render() {
 
 	footerRow := rows
 	if rows >= 6 {
+		managedWorktree := p.isManagedWorktree(list)
 		footer := "  a add · A worktree · e label · n needs you · p pin · s agent · ^x stop · q close"
-		if p.selectedIsManagedWorktree() {
+		if managedWorktree {
 			footer = "  a add · A worktree · D cleanup · e label · n needs you · p pin · ^x stop · q close"
 		}
 		if cols < 60 {
 			footer = "  a add · A tree · e label · n next · p pin · ^x stop · q"
-			if p.selectedIsManagedWorktree() {
+			if managedWorktree {
 				footer = "  a add · A tree · D clean · n next · p pin · ^x stop · q"
 			}
 		}
@@ -662,7 +811,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 		if sessionState(session) != types.Working {
 			continue
 		}
-		key := gitPathKey(session.Path)
+		key := p.pathKey(session.Path)
 		if key == "" {
 			key = session.Name
 		}
@@ -697,7 +846,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 			previousProject = ""
 		}
 
-		projectKey := gitPathKey(session.Path)
+		projectKey := p.pathKey(session.Path)
 		if projectKey == "" {
 			projectKey = session.Name
 		}
@@ -766,7 +915,7 @@ func (p *picker) buildListRows(list []types.Session) []pickerListRow {
 		nextSameProject := false
 		if i+1 < len(list) {
 			next := list[i+1]
-			nextKey := gitPathKey(next.Path)
+			nextKey := p.pathKey(next.Path)
 			if nextKey == "" {
 				nextKey = next.Name
 			}
@@ -1211,10 +1360,11 @@ func sessionLabel(session types.Session) string {
 // selectCreatedSession consumes the window ID left by the create prompt and
 // moves the picker and live preview to that exact new session.
 func (p *picker) selectCreatedSession() bool {
-	windowID := tmux.GetWindowOption(windowName, pickerSelectionOption)
+	windowID := p.pendingSelection
 	if windowID == "" {
 		return false
 	}
+	p.pendingSelection = ""
 	var created types.Session
 	found := false
 	for _, session := range p.sessions {
@@ -1265,8 +1415,34 @@ func (p *picker) sessionOrigin(session types.Session) string {
 	return origin
 }
 
-func (p *picker) switchToProject(session types.Session) bool {
-	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
+// parentClient returns the client the user is driving this control room from.
+// @llm_parent is shared by every room on the server, so with several
+// terminals attached it may name another terminal; a client currently showing
+// this room's window is preferred.
+func (p *picker) parentClient() string {
+	preferred := tmux.GetGlobalOption("@llm_parent", p.parent)
+	if p.ownWindowID == "" {
+		return preferred
+	}
+	viewer := ""
+	for _, client := range tmux.ListClients() {
+		if client.WindowID != p.ownWindowID {
+			continue
+		}
+		if client.Client == preferred {
+			return preferred
+		}
+		if viewer == "" {
+			viewer = client.Client
+		}
+	}
+	if viewer != "" {
+		return viewer
+	}
+	return preferred
+}
+
+func (p *picker) switchToProject(session types.Session, parent string) bool {
 	if parent == "" {
 		p.activateErr = "no parent tmux client is available"
 		p.render()
@@ -1313,7 +1489,7 @@ func (p *picker) reviewProject() {
 	if p.selectedIndex >= len(list) {
 		return
 	}
-	p.switchToProject(list[p.selectedIndex])
+	p.switchToProject(list[p.selectedIndex], p.parentClient())
 }
 
 // activateSession switches the parent client to the selected project's
@@ -1325,12 +1501,12 @@ func (p *picker) activateSession() {
 		return
 	}
 	session := list[p.selectedIndex]
-	if !p.switchToProject(session) {
+	parent := p.parentClient()
+	if !p.switchToProject(session, parent) {
 		return
 	}
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
 	height := tmux.GetGlobalOption("@llm_popup_height", "90%")
-	parent := tmux.GetGlobalOption("@llm_parent", p.parent)
 	attachCmd := tmux.AttachCommand(session.Name, false) + " \\; select-window -t " + tmux.ShellQuote(session.WindowID)
 	cmd := exec.Command("tmux", "display-popup",
 		"-c", parent,
@@ -1350,14 +1526,21 @@ func (p *picker) activateSession() {
 }
 
 func (p *picker) selectedIsManagedWorktree() bool {
-	list := p.filtered()
+	return p.isManagedWorktree(p.filtered())
+}
+
+// isManagedWorktree reports whether the selected entry of list is an
+// llmux-created worktree. Git metadata already records manifest ownership,
+// so the manifest is only read before the first git refresh.
+func (p *picker) isManagedWorktree(list []types.Session) bool {
 	if p.selectedIndex < 0 || p.selectedIndex >= len(list) {
 		return false
 	}
-	if info := p.gitByPath[gitPathKey(list[p.selectedIndex].Path)]; info.managedWorktree {
-		return true
+	path := list[p.selectedIndex].Path
+	if info, ok := p.gitByPath[p.pathKey(path)]; ok && info.valid {
+		return info.managedWorktree
 	}
-	_, err := worktree.Load(list[p.selectedIndex].Path)
+	_, err := worktree.Load(path)
 	return err == nil
 }
 
@@ -1415,7 +1598,7 @@ func (p *picker) cleanupSelectedWorktree() {
 	}
 
 	p.replaceSessions(sessions.GetAllSessions(p.prefix))
-	_ = sessions.PublishWaitingStatus(p.sessions)
+	p.syncWaitingStatus()
 	p.notice = "removed isolated worktree; branch " + removed.Branch + " kept"
 	p.noticeError = false
 	p.activateErr = ""
@@ -1434,7 +1617,9 @@ func (p *picker) validateWorktreePanes(agentSession, path string) error {
 	targetPath := gitPathKey(path)
 	for _, line := range strings.Split(result.Stdout, "\n") {
 		parts := strings.SplitN(line, "\t", 5)
-		if len(parts) != 5 || gitPathKey(parts[3]) != targetPath {
+		// A shell or editor anywhere inside the checkout would be left in a
+		// deleted directory, not only one sitting at its root.
+		if len(parts) != 5 || !worktree.Within(parts[3], path) {
 			continue
 		}
 		if parts[0] == agentSession {
@@ -1508,7 +1693,7 @@ func (p *picker) killSelected() {
 	}
 
 	p.replaceSessions(sessions.GetAllSessions(p.prefix))
-	_ = sessions.PublishWaitingStatus(p.sessions)
+	p.syncWaitingStatus()
 	p.notice = "stopped " + label
 	p.noticeError = false
 	p.activateErr = ""
@@ -1651,7 +1836,7 @@ func (p *picker) handleLabelKey(key string) {
 // the catalog and re-renders so the header reflects the new choice. Only
 // affects new sessions — already-running sessions keep their agent.
 func (p *picker) cycleAgent() {
-	agent.Cycle()
+	p.activeAgent = agent.Cycle()
 	p.activateErr = ""
 	p.confirmStopID = ""
 	p.confirmLabel = ""
@@ -1857,7 +2042,7 @@ func (p *picker) handleSearchKey(key string) (done bool) {
 
 func (p *picker) openCreatePopup() {
 	defaultPath := p.createDefaultPath()
-	p.startCreatePopup(binaryPath()+" prompt "+tmux.ShellQuote(defaultPath), "30%")
+	p.startCreatePopup(tmux.ShellQuote(binaryPath())+" prompt "+tmux.ShellQuote(defaultPath), "30%")
 }
 
 func (p *picker) openWorktreeCreatePopup() {
@@ -1869,7 +2054,7 @@ func (p *picker) openWorktreeCreatePopup() {
 		p.render()
 		return
 	}
-	p.startCreatePopup(binaryPath()+" worktree-prompt "+tmux.ShellQuote(defaultPath), "55%")
+	p.startCreatePopup(tmux.ShellQuote(binaryPath())+" worktree-prompt "+tmux.ShellQuote(defaultPath), "55%")
 }
 
 func (p *picker) createDefaultPath() string {
@@ -1888,11 +2073,14 @@ func (p *picker) createDefaultPath() string {
 
 func (p *picker) startCreatePopup(command, height string) {
 	width := tmux.GetGlobalOption("@llm_popup_width", "90%")
-	cmd := exec.Command("tmux", "display-popup",
-		"-w", width,
-		"-h", height,
-		"-E",
-		command)
+	args := []string{"display-popup", "-w", width, "-h", height, "-E", command}
+	if parent := p.parentClient(); parent != "" {
+		// The new agent records its origin from @llm_parent, so point it at the
+		// terminal this room is shown on before the prompt runs.
+		_ = tmux.SetGlobalOption("@llm_parent", parent)
+		args = append([]string{"display-popup", "-c", parent}, args[1:]...)
+	}
+	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil

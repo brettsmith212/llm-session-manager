@@ -45,12 +45,19 @@ func TestDisplayFloatingNotificationIsDetachedAndTransient(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := strings.Split(geometry, "|")
-	if len(parts) != 7 || parts[0] != "1" || parts[1] != "0" || parts[4] != "0" || parts[5] != "3" || parts[6] != "1" {
+	if len(parts) != 7 || parts[0] != "1" || parts[1] != "0" || parts[6] != "1" {
 		t.Fatalf("floating pane geometry = %q", geometry)
 	}
+	// tmux 3.7 reports the requested 3-row box; 3.8 draws its border inside
+	// the box and reports the single content row within it.
 	left, leftErr := strconv.Atoi(parts[2])
 	width, widthErr := strconv.Atoi(parts[3])
-	if leftErr != nil || widthErr != nil || left+width != 120 {
+	top, topErr := strconv.Atoi(parts[4])
+	height, heightErr := strconv.Atoi(parts[5])
+	if leftErr != nil || widthErr != nil || topErr != nil || heightErr != nil {
+		t.Fatalf("floating pane geometry = %q", geometry)
+	}
+	if right := left + width; right < 119 || right > 120 || top > 1 || height < 1 || height > 3 {
 		t.Fatalf("floating pane is not top-right: geometry=%q", geometry)
 	}
 	if active, err := DisplayMessage("#{pane_id}", "target:editor"); err != nil || active != originalPane {
@@ -112,6 +119,42 @@ func TestRingClientBellsWritesOncePerTTY(t *testing.T) {
 		if string(got) != "\a" {
 			t.Fatalf("bell output for %s = %q, want BEL", path, got)
 		}
+	}
+}
+
+func TestBatchSeparatesCommandsAndKeepsTrailingSemicolons(t *testing.T) {
+	got := Batch(
+		SetWindowOptionArgs("@1", "@llm_label", "fix parser;"),
+		nil,
+		[]string{"wait-for", "-S", "channel"},
+	)
+	want := []string{"set-window-option", "-t", "@1", "@llm_label", `fix parser\;`, ";", "wait-for", "-S", "channel"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("Batch() = %q, want %q", got, want)
+	}
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	t.Setenv("TMUX", "")
+	socketDir, err := os.MkdirTemp("/tmp", "llmux-batch-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("TMUX_TMPDIR", socketDir)
+	t.Cleanup(func() { _ = RunRaw([]string{"kill-server"}) })
+	if _, err := Run([]string{"new-session", "-d", "-s", "target", "sleep 1000"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Batch(
+		SetWindowOptionArgs("target:", "@llm_label", "fix parser;"),
+		SetGlobalOptionArgs("@after", "ran"),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if label, after := GetWindowOption("target:", "@llm_label"), GetGlobalOption("@after", ""); label != "fix parser;" || after != "ran" {
+		t.Fatalf("label=%q after=%q, want the literal label and both commands run", label, after)
 	}
 }
 

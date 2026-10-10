@@ -15,10 +15,20 @@ import (
 	"llm-session-manager/internal/types"
 )
 
-// StaleSeconds is the grace period after which "working" is downgraded to "idle".
+// StaleSeconds is the grace period after which "working" is downgraded to
+// "idle" when an agent stops reporting altogether.
 const StaleSeconds = 300
 
-const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}\t#{pane_current_command}\t#{pane_start_command}\t#{@llm_label}\t#{@llm_pinned}"
+// ChangedChannel is the tmux wait-for channel signalled whenever an agent
+// changes state, so open Control Rooms refresh immediately instead of waiting
+// for their next poll.
+const ChangedChannel = "llmux-changed"
+
+const windowFormat = "#{session_name}\t#{window_id}\t#{window_index}\t#{@llm_state}\t#{@llm_state_at}\t#{@llm_path}\t#{@llm_origin}\t#{pane_current_path}\t#{@llm_agent}\t#{window_name}\t#{pane_current_command}\t#{pane_start_command}\t#{@llm_label}\t#{@llm_pinned}\t#{@llm_seen_at}"
+
+// waitingMarksFormat expands to one "x" for every managed agent window that is
+// waiting, across all sessions.
+const waitingMarksFormat = "#{S:#{W:#{?#{&&:#{@llm_agent},#{==:#{@llm_state},waiting}},x,}}}"
 
 // SessionHash returns a short SHA256 hash of path.
 func SessionHash(path string) string {
@@ -27,8 +37,32 @@ func SessionHash(path string) string {
 }
 
 // SessionNameForPath builds the managed session name for a working directory.
+// The physical path is hashed so the shell warm hook ($PWD), tmux bindings
+// (#{pane_current_path}) and the Control Room all agree on one session per
+// directory, even through symlinks or trailing slashes.
 func SessionNameForPath(path, prefix string) string {
-	return prefix + SessionHash(path)
+	return prefix + SessionHash(physicalPath(CanonicalPath(path)))
+}
+
+// CanonicalPath expands a leading ~ and returns the cleaned absolute path. It
+// keeps symlinks intact so displayed paths match what the user typed.
+func CanonicalPath(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home := os.Getenv("HOME"); home != "" {
+			path = home + strings.TrimPrefix(path, "~")
+		}
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
+}
+
+func physicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // FormatAgo renders a relative time string.
@@ -54,16 +88,19 @@ func FormatAgo(timestamp int64) string {
 // FormatPath shortens a path with ~ for the home directory.
 func FormatPath(path string) string {
 	home := os.Getenv("HOME")
-	if home != "" && strings.HasPrefix(path, home) {
+	if home != "" && (path == home || strings.HasPrefix(path, home+"/")) {
 		return "~" + strings.TrimPrefix(path, home)
 	}
 	return path
 }
 
-// EffectiveState returns the displayed state, downgrading stale working sessions.
+// EffectiveState returns the displayed state, downgrading working sessions
+// that have stopped reporting. Every hook refreshes @llm_seen_at, so a busy
+// agent stays "working" even though its state has not changed for a while.
 func EffectiveState(s types.Session) types.State {
-	if s.State == types.Working && s.StateAt != 0 {
-		age := time.Now().Unix() - s.StateAt
+	lastReport := max(s.SeenAt, s.StateAt)
+	if s.State == types.Working && lastReport != 0 {
+		age := time.Now().Unix() - lastReport
 		if age > StaleSeconds {
 			return types.Idle
 		}
@@ -71,26 +108,34 @@ func EffectiveState(s types.Session) types.State {
 	return s.State
 }
 
-// PublishWaitingStatus updates the lightweight tmux options used by status
-// bars to show when an agent needs attention. The display value is empty when
-// no sessions are waiting, so embedding #{@llm_status} adds no idle clutter.
-func PublishWaitingStatus(all []types.Session) error {
+// WaitingStatusCommands recount waiting agents inside tmux and publish the
+// lightweight options used by status bars. Running them in the same command
+// list as a state change keeps concurrent hooks from publishing stale counts.
+// The display value is empty when no sessions are waiting, so embedding
+// #{@llm_status} adds no idle clutter.
+func WaitingStatusCommands() [][]string {
+	return [][]string{
+		{"set-option", "-gF", "@llm_waiting_marks", waitingMarksFormat},
+		{"set-option", "-gF", "@llm_waiting_count", "#{n:@llm_waiting_marks}"},
+		{"set-option", "-gF", "@llm_status", "#{?#{==:#{@llm_waiting_count},0},,◆ #{@llm_waiting_count} needs you}"},
+	}
+}
+
+// PublishWaitingStatus recounts waiting agents and updates the status options.
+func PublishWaitingStatus() error {
+	_, err := tmux.Run(tmux.Batch(WaitingStatusCommands()...))
+	return err
+}
+
+// CountWaiting returns how many sessions currently need the user.
+func CountWaiting(all []types.Session) int {
 	waiting := 0
 	for _, session := range all {
 		if EffectiveState(session) == types.Waiting {
 			waiting++
 		}
 	}
-
-	count := strconv.Itoa(waiting)
-	status := ""
-	if waiting > 0 {
-		status = fmt.Sprintf("◆ %d needs you", waiting)
-	}
-	if err := tmux.SetGlobalOption("@llm_waiting_count", count); err != nil {
-		return err
-	}
-	return tmux.SetGlobalOption("@llm_status", status)
+	return waiting
 }
 
 // GetAllSessions fetches all managed agent windows across all managed tmux
@@ -107,7 +152,7 @@ func GetAllSessions(prefix string) []types.Session {
 		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 14)
+		parts := strings.SplitN(line, "\t", 15)
 		if len(parts) < 9 {
 			continue
 		}
@@ -165,6 +210,13 @@ func GetAllSessions(prefix string) []types.Session {
 			pinned = parts[13] == "1"
 		}
 
+		seenAt := int64(0)
+		if len(parts) > 14 && parts[14] != "" {
+			if n, err := strconv.ParseInt(parts[14], 10, 64); err == nil {
+				seenAt = n
+			}
+		}
+
 		session := types.Session{
 			Name:        name,
 			WindowID:    windowID,
@@ -173,6 +225,7 @@ func GetAllSessions(prefix string) []types.Session {
 			Label:       label,
 			State:       state,
 			StateAt:     stateAt,
+			SeenAt:      seenAt,
 			Path:        path,
 			Origin:      origin,
 			Pinned:      pinned,

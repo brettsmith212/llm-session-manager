@@ -92,7 +92,7 @@ command finishes, because Codex has no hook for approval decisions.
 ## Build standalone
 
 ```bash
-nix build .#llmux           # the binary
+nix build .#default         # the binary
 nix build .#claude-plugin   # the Claude Code plugin
 nix build .#amp-plugin      # the Amp plugin
 nix build .#opencode-plugin # the OpenCode plugin
@@ -151,10 +151,23 @@ set -g @llm_worktree_branch_prefix 'brett'
 # Optional ambient indicator; llmux keeps @llm_status updated and leaves it
 # empty when no sessions need attention.
 set -ag status-right ' #[fg=#f9e2af]#{@llm_status}#[default]'
+
+# Ctrl+a y opens (or, inside a popup, closes) the project's agent popup;
+# Ctrl+a u opens the control room.
+bind y if-shell -F "#{m:llm-*,#{session_name}}" \
+  "detach-client" \
+  "run-shell 'llmux launch \"#{pane_current_path}\" \"#{session_name}\"'"
+bind u run-shell 'llmux list "#{client_name}"'
 ```
 
+Bind `y` and `u` without `-r`. A repeatable binding keeps tmux in the prefix
+table for `repeat-time`, so keys such as `j`, `k`, or `g` typed right after
+opening the control room would run any repeatable bindings of your own instead
+of reaching the picker.
+
 `llmux` also maintains the numeric `@llm_waiting_count` option for custom
-status formats. Both values update whenever an agent reports a state change.
+status formats. Both values are recounted inside tmux whenever an agent changes
+state, and an open control room corrects them if an agent exits while waiting.
 
 On tmux 3.7 or newer, when an agent first enters `waiting`, llmux also shows a
 yellow notification for about five seconds in the top-right of every window
@@ -213,7 +226,9 @@ Sessions are grouped into **Pinned**, **Needs You**, **Active**, and **Idle**
 sections, then by project recency. The **Pinned** section appears only when one
 or more sessions have been pinned with `p` and stays at the top regardless of
 state. Within each section, repository families and their checkouts sort by the
-most recent state report among their visible sessions. Checkouts from the same
+most recent state change among their visible sessions. Agents report on every
+tool call, but only a change of state (for example from working to needs you)
+moves a group, so busy agents do not reshuffle the list. Checkouts from the same
 Git repository remain together; equal recency keeps the primary checkout before
 its worktrees and uses task, branch, and path as deterministic fallbacks. The
 repository, its primary checkout, and worktrees are rendered as an indented
@@ -224,9 +239,14 @@ non-Git or unavailable directories omit that line. Git reads are local, cached,
 and never fetch from a remote. Multiple agents in the same working directory
 appear as muted `shared checkout` metadata; this becomes a yellow warning only
 when more than one of them is actively working. Within a single checkout
-directory, agents sort by most-recently-updated first, so the session that
-reported a state change last surfaces above its older siblings regardless of
-its tmux window index.
+directory, agents sort by most recent state change first, so the session that
+changed state last surfaces above its older siblings regardless of its tmux
+window index. The relative time on each row is how long the agent has been in
+its current state.
+
+The control room refreshes the moment any agent changes state. Git status is
+read only while the room is on screen, without taking Git's index lock, so it
+never interferes with Git commands the agents run in the same checkouts.
 
 The popup handoff preserves the project-parent workflow: closing the popup
 returns to the matching project window for Neovim, diff review, and shell work.
@@ -303,8 +323,10 @@ current choice is shown in the header — `agent: opencode ▾`,
 color-coded to match the per-row badge. Only **new** sessions pick up the
 change: existing sessions keep running whatever agent they booted with, so
 you can have opencode sessions and a fresh claude session side by side in
-the control room. The override lives in `@llm_active_agent`, a runtime tmux
-option, so a fresh tmux server silently reverts to `@llm_command`.
+the control room. A pre-warmed session you have not opened yet counts as new:
+if it was warmed with a different agent, opening it starts the selected agent
+instead. The override lives in `@llm_active_agent`, a runtime tmux option, so
+a fresh tmux server silently reverts to `@llm_command`.
 
 ### Pre-warming
 

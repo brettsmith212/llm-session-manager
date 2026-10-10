@@ -9,8 +9,6 @@ const (
 	Idle    State = "idle"
 )
 
-var states = []State{Working, Waiting, Idle}
-
 // IsState reports whether value is a known session state.
 func IsState(value string) bool {
 	switch State(value) {
@@ -29,7 +27,8 @@ type Session struct {
 	Label        string // optional human-readable task/purpose
 	State        State
 	DisplayState State // effective state frozen at the latest tmux refresh
-	StateAt      int64
+	StateAt      int64 // when the agent last changed state (@llm_state_at)
+	SeenAt       int64 // when the agent last reported any state (@llm_seen_at)
 	Path         string
 	Origin       string
 	Pinned       bool // pinned to the top of the control room via the `p` key (@llm_pinned window option)

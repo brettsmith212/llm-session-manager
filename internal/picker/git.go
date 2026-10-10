@@ -2,17 +2,34 @@ package picker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"llm-session-manager/internal/worktree"
 )
 
-const gitCommandTimeout = 750 * time.Millisecond
+const (
+	gitCommandTimeout = 1500 * time.Millisecond
+	// gitInspectWorkers bounds how many checkouts are inspected at once.
+	gitInspectWorkers = 4
+)
+
+var errGitTimeout = errors.New("git timed out")
+
+// gitRefresh is the result of one background inspection pass. failed holds
+// the keys of checkouts whose inspection timed out; their previous metadata
+// is kept rather than dropped.
+type gitRefresh struct {
+	info   map[string]gitInfo
+	failed map[string]bool
+}
 
 type gitInfo struct {
 	valid           bool
@@ -44,31 +61,54 @@ func gitPathKey(path string) string {
 	return abs
 }
 
-func collectGitInfo(paths []string) map[string]gitInfo {
-	result := make(map[string]gitInfo, len(paths))
+func collectGitInfo(paths []string) gitRefresh {
+	result := gitRefresh{info: make(map[string]gitInfo, len(paths)), failed: make(map[string]bool)}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, gitInspectWorkers)
+	seen := make(map[string]bool, len(paths))
 	for _, path := range paths {
 		key := gitPathKey(path)
-		if key == "" {
+		if key == "" || seen[key] {
 			continue
 		}
-		if _, exists := result[key]; exists {
-			continue
-		}
-		if info := inspectGit(path); info.valid {
-			result[key] = info
-		}
+		seen[key] = true
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(key, path string) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			info, err := inspectGitChecked(path)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case errors.Is(err, errGitTimeout):
+				result.failed[key] = true
+			case info.valid:
+				result.info[key] = info
+			}
+		}(key, path)
 	}
+	wg.Wait()
 	return result
 }
 
 func inspectGit(path string) gitInfo {
-	status, ok := runGit(path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
-	if !ok {
-		return gitInfo{}
+	info, _ := inspectGitChecked(path)
+	return info
+}
+
+// inspectGitChecked reads a checkout's branch and working-tree summary. Its
+// error is errGitTimeout when git was too slow to answer, which says nothing
+// about whether path is a repository.
+func inspectGitChecked(path string) (gitInfo, error) {
+	status, err := runGit(path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
+	if err != nil {
+		return gitInfo{}, err
 	}
 
 	info := gitInfo{valid: true}
-	if identity, ok := runGit(path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"); ok {
+	if identity, err := runGit(path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"); err == nil {
 		parts := strings.Split(identity, "\n")
 		if len(parts) >= 3 {
 			info.checkoutPath = gitPathKey(strings.TrimSpace(parts[0]))
@@ -105,7 +145,12 @@ func inspectGit(path string) gitInfo {
 		info.branch = "git"
 	}
 
-	if diff, ok := runGit(path, "diff", "--numstat", "HEAD", "--"); ok {
+	// Untracked files never appear in the diff, so a checkout without tracked
+	// changes needs no second pass over its files.
+	if info.changed == 0 {
+		return info, nil
+	}
+	if diff, err := runGit(path, "diff", "--numstat", "HEAD", "--"); err == nil {
 		for _, line := range strings.Split(diff, "\n") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
@@ -119,18 +164,28 @@ func inspectGit(path string) gitInfo {
 			}
 		}
 	}
-	return info
+	return info, nil
 }
 
-func runGit(path string, args ...string) (string, bool) {
+// runGit runs a read-only git command for the Control Room. Agents run git in
+// these same checkouts, so --no-optional-locks keeps status from taking
+// .git/index.lock to refresh the index, which would make their commands fail.
+// A slow command is stopped with SIGTERM so git can clean up after itself.
+func runGit(path string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
 	defer cancel()
-	commandArgs := append([]string{"-C", path}, args...)
-	output, err := exec.CommandContext(ctx, "git", commandArgs...).Output()
-	if err != nil {
-		return "", false
+	commandArgs := append([]string{"--no-optional-locks", "-C", path}, args...)
+	cmd := exec.CommandContext(ctx, "git", commandArgs...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 500 * time.Millisecond
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", errGitTimeout
 	}
-	return strings.TrimSpace(string(output)), true
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func formatGitInfo(info gitInfo) string {

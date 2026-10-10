@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,14 @@ const waitingNotificationDuration = 5 * time.Second
 
 var sendWaitingNotification = notifyWaitingClients
 
-// SetState updates the current tmux window's state and timestamp.
+// paneInfoFormat resolves, in one tmux round trip, everything a hook needs to
+// decide what to write. Label and paths come last because they are free text.
+const paneInfoFormat = "#{session_name}\t#{window_id}\t#{@llm_agent}\t#{@llm_state}\t#{@llm_ever_attached}\t#{@llm_session_prefix}\t#{@llm_label}\t#{@llm_path}\t#{pane_current_path}"
+
+// SetState records a state report for the current tmux window. Agents report
+// on every tool call, so an unchanged state costs two tmux calls: one read and
+// one heartbeat write. A change additionally recounts waiting agents and wakes
+// any open Control Room in the same tmux command list.
 func SetState(state types.State) error {
 	pane := os.Getenv("TMUX_PANE")
 	if pane == "" {
@@ -24,59 +32,65 @@ func SetState(state types.State) error {
 		return nil
 	}
 
-	prefix := tmux.GetGlobalOption("@llm_session_prefix", "llm-")
-	result := tmux.RunRaw([]string{"display-message", "-p", "-t", pane, "#{session_name}"})
+	result := tmux.RunRaw([]string{"display-message", "-p", "-t", pane, paneInfoFormat})
 	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to resolve session from pane")
+		return fmt.Errorf("failed to resolve session from pane: %s", result.Stderr)
 	}
-
-	session := strings.TrimSpace(result.Stdout)
+	fields := strings.SplitN(result.Stdout, "\t", 9)
+	if len(fields) != 9 {
+		return fmt.Errorf("unexpected pane details from tmux: %q", result.Stdout)
+	}
+	session, windowID, agentMarker, previousState, everAttached, prefix := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]
+	if prefix == "" {
+		prefix = "llm-"
+	}
 	if session == "" || !strings.HasPrefix(session, prefix) {
 		return nil
 	}
-
-	result = tmux.RunRaw([]string{"display-message", "-p", "-t", pane, "#{window_id}"})
-	if result.ExitCode != 0 {
-		return fmt.Errorf("failed to resolve window from pane")
-	}
-	windowID := strings.TrimSpace(result.Stdout)
 	if windowID == "" {
 		return fmt.Errorf("empty window id from pane")
 	}
 
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	changed := previousState != string(state)
+	var commands [][]string
+	if changed {
+		commands = append(commands,
+			tmux.SetWindowOptionArgs(windowID, "@llm_state", string(state)),
+			tmux.SetWindowOptionArgs(windowID, "@llm_state_at", now))
+	}
+	commands = append(commands, tmux.SetWindowOptionArgs(windowID, "@llm_seen_at", now))
 	// Mark this window as hosting a managed agent if it isn't already.
 	// Skip for warm-only sessions (never attached) — they stay hidden
 	// from the picker until launch/add promotes them.
-	if tmux.GetWindowOption(windowID, "@llm_agent") == "" {
-		if tmux.GetSessionOption(session, "@llm_ever_attached") != "" {
-			if err := tmux.SetWindowOption(windowID, "@llm_agent", "1"); err != nil {
-				return err
-			}
-		}
+	if agentMarker == "" && everAttached != "" {
+		commands = append(commands, tmux.SetWindowOptionArgs(windowID, "@llm_agent", "1"))
 	}
-
-	previousState := tmux.GetWindowOption(windowID, "@llm_state")
-	if err := tmux.SetWindowOption(windowID, "@llm_state", string(state)); err != nil {
-		return err
+	if changed {
+		// Recounting every managed window keeps the status bar correct even if
+		// an earlier hook was interrupted, and the signal lets open Control
+		// Rooms redraw immediately.
+		commands = append(commands, sessions.WaitingStatusCommands()...)
+		commands = append(commands, []string{"wait-for", "-S", sessions.ChangedChannel})
 	}
-	if err := tmux.SetWindowOption(windowID, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix())); err != nil {
+	if _, err := tmux.Run(tmux.Batch(commands...)); err != nil {
 		return err
 	}
 
-	// Keep status-bar options synchronized with every lifecycle transition.
-	// Recounting all managed windows also self-heals if an earlier hook was
-	// interrupted after updating its window but before publishing the count.
-	allSessions := sessions.GetAllSessions(prefix)
-	statusErr := sessions.PublishWaitingStatus(allSessions)
-	if previousState != string(types.Waiting) && state == types.Waiting {
-		for _, session := range allSessions {
-			if session.WindowID == windowID {
-				sendWaitingNotification(prefix, session)
-				break
-			}
+	if changed && state == types.Waiting {
+		path := fields[7]
+		if path == "" {
+			path = fields[8]
 		}
+		sendWaitingNotification(prefix, types.Session{
+			Name:     session,
+			WindowID: windowID,
+			Label:    fields[6],
+			Path:     path,
+			State:    state,
+		})
 	}
-	return statusErr
+	return nil
 }
 
 // SeedIdle marks a newly created agent window idle unless the agent has
@@ -85,16 +99,20 @@ func SeedIdle(window string) error {
 	if tmux.GetWindowOption(window, "@llm_state") != "" {
 		return nil
 	}
-	if err := tmux.SetWindowOption(window, "@llm_state", string(types.Idle)); err != nil {
-		return err
-	}
-	return tmux.SetWindowOption(window, "@llm_state_at", fmt.Sprintf("%d", time.Now().Unix()))
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	_, err := tmux.Run(tmux.Batch(
+		tmux.SetWindowOptionArgs(window, "@llm_state", string(types.Idle)),
+		tmux.SetWindowOptionArgs(window, "@llm_state_at", now),
+	))
+	return err
 }
 
 func notifyWaitingClients(prefix string, session types.Session) {
 	clients := tmux.ListClients()
 	if chimeEnabled(tmux.GetGlobalOption("@llm_chime", "true")) {
-		tmux.RingClientBells(clients)
+		// Nested clients (Control Room live panes and agent popups) share the
+		// outer terminal, so ringing them as well would chime twice.
+		tmux.RingClientBells(outerClients(prefix, clients))
 	}
 	if !tmux.SupportsFloatingPanes() {
 		return
@@ -103,6 +121,16 @@ func notifyWaitingClients(prefix string, session types.Session) {
 	for _, window := range notificationWindows(prefix, clients) {
 		_, _ = tmux.DisplayFloatingNotification(window.id, window.width, message, waitingNotificationDuration)
 	}
+}
+
+func outerClients(prefix string, clients []tmux.ClientInfo) []tmux.ClientInfo {
+	outer := make([]tmux.ClientInfo, 0, len(clients))
+	for _, client := range clients {
+		if !strings.HasPrefix(client.Session, prefix) {
+			outer = append(outer, client)
+		}
+	}
+	return outer
 }
 
 func chimeEnabled(value string) bool {

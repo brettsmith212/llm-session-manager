@@ -100,7 +100,8 @@ func Inspect(path, worktreeBase string) (Repository, error) {
 		}
 		branch = "detached@" + shortHead
 	}
-	status, err := gitOutputAt(checkout, "status", "--porcelain", "--untracked-files=normal")
+	// --no-optional-locks: an agent may be running git in this checkout.
+	status, err := gitOutputAt(checkout, "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return Repository{}, fmt.Errorf("couldn't inspect Git status: %w", err)
 	}
@@ -236,7 +237,7 @@ func ValidateRemoval(path string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("worktree directory is unavailable: %w", err)
 	}
 	status, err := gitOutputAt(manifest.WorktreePath,
-		"status", "--porcelain", "--untracked-files=normal")
+		"--no-optional-locks", "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return Manifest{}, fmt.Errorf("couldn't inspect worktree status: %w", err)
 	}
@@ -343,6 +344,24 @@ func Load(path string) (Manifest, error) {
 	}
 	manifest.WorktreePath = recorded
 	return manifest, nil
+}
+
+// Within reports whether path is root or lies beneath it, comparing physical
+// paths so symlinked spellings of the same directory match.
+func Within(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	normalizedPath, err := normalizePath(path)
+	if err != nil {
+		return false
+	}
+	normalizedRoot, err := normalizePath(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(normalizedRoot, normalizedPath)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // List returns all readable llmux worktree manifests, including worktrees

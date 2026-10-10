@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,10 @@ import (
 	"unicode/utf8"
 )
 
+// commandTimeout bounds ordinary tmux calls so a wedged server cannot hang
+// agent hooks or the Control Room indefinitely.
+const commandTimeout = 5 * time.Second
+
 // Result captures the output and exit code of a tmux invocation.
 type Result struct {
 	Stdout   string
@@ -21,24 +26,67 @@ type Result struct {
 
 // RunRaw runs a tmux command and returns raw output without checking the exit code.
 func RunRaw(args []string) Result {
-	cmd := exec.Command("tmux", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	return RunContext(ctx, args)
+}
+
+// RunBlocking runs a tmux command that legitimately waits on the user or on
+// another process, such as display-popup or wait-for, without a timeout.
+func RunBlocking(args []string) Result {
+	return RunContext(context.Background(), args)
+}
+
+// RunContext runs a tmux command that is cancelled with ctx.
+func RunContext(ctx context.Context, args []string) Result {
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := err.(*exec.ExitError); ok && ctx.Err() == nil {
 			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = 1
 		}
 	}
+	stderr := strings.TrimRight(errOut.String(), "\n")
+	if ctx.Err() == context.DeadlineExceeded && stderr == "" {
+		stderr = "timed out"
+	}
 	return Result{
 		Stdout:   strings.TrimRight(out.String(), "\n"),
-		Stderr:   strings.TrimRight(errOut.String(), "\n"),
+		Stderr:   stderr,
 		ExitCode: exitCode,
 	}
+}
+
+// Batch joins several tmux commands into one invocation, separated the same
+// way as `\;` on a shell command line. tmux skips the remaining commands after
+// the first one that fails, so callers order them from most to least important.
+func Batch(commands ...[]string) []string {
+	var args []string
+	for _, command := range commands {
+		if len(command) == 0 {
+			continue
+		}
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, command...)
+	}
+	return args
+}
+
+// literal protects a user-supplied argument that ends in ";", which tmux would
+// otherwise treat as a command separator.
+func literal(value string) string {
+	if strings.HasSuffix(value, ";") {
+		return value[:len(value)-1] + `\;`
+	}
+	return value
 }
 
 // Run runs a tmux command and returns its stdout, or an error if it fails.
@@ -71,8 +119,14 @@ func GetSessionOption(session, name string) string {
 
 // SetSessionOption sets a session option.
 func SetSessionOption(session, name, value string) error {
-	_, err := Run([]string{"set-option", "-t", session, name, value})
+	_, err := Run(SetSessionOptionArgs(session, name, value))
 	return err
+}
+
+// SetSessionOptionArgs returns the tmux arguments that set a session option,
+// for use with Batch.
+func SetSessionOptionArgs(session, name, value string) []string {
+	return []string{"set-option", "-t", session, name, literal(value)}
 }
 
 // GetWindowOption reads a window option, returning "" if unset.
@@ -83,8 +137,14 @@ func GetWindowOption(window, name string) string {
 
 // SetWindowOption sets a window option.
 func SetWindowOption(window, name, value string) error {
-	_, err := Run([]string{"set-window-option", "-t", window, name, value})
+	_, err := Run(SetWindowOptionArgs(window, name, value))
 	return err
+}
+
+// SetWindowOptionArgs returns the tmux arguments that set a window option,
+// for use with Batch.
+func SetWindowOptionArgs(window, name, value string) []string {
+	return []string{"set-window-option", "-t", window, name, literal(value)}
 }
 
 // UnsetWindowOption clears a window option, returning an error if tmux rejects
@@ -96,8 +156,14 @@ func UnsetWindowOption(window, name string) error {
 
 // SetGlobalOption sets a global option.
 func SetGlobalOption(name, value string) error {
-	_, err := Run([]string{"set-option", "-g", name, value})
+	_, err := Run(SetGlobalOptionArgs(name, value))
 	return err
+}
+
+// SetGlobalOptionArgs returns the tmux arguments that set a global option,
+// for use with Batch.
+func SetGlobalOptionArgs(name, value string) []string {
+	return []string{"set-option", "-g", name, literal(value)}
 }
 
 // ShellQuote single-quotes a string for safe interpolation into a shell command.
@@ -251,6 +317,11 @@ func DisplayFloatingNotification(windowID string, windowWidth int, message strin
 	message = truncateRunes(message, max(1, width-panePadding))
 	x := max(0, windowWidth-width)
 	seconds := strconv.FormatFloat(duration.Seconds(), 'f', 3, 64)
+	// tmux 3.7 sizes the floating pane's content area, while 3.8 includes the
+	// border in -x/-y and leaves a single content row. Only pad above the
+	// message when the pane is tall enough to keep it visible.
+	script := `rows=$(stty size 2>/dev/null); rows=${rows%% *}; ` +
+		`[ "${rows:-3}" -ge 3 ] && printf '\n'; printf '  %s' "$1"; sleep "$2"`
 	args := []string{
 		"new-pane", "-d", "-P", "-F", "#{pane_id}",
 		"-t", windowID,
@@ -258,7 +329,7 @@ func DisplayFloatingNotification(windowID string, windowWidth int, message strin
 		"-X", strconv.Itoa(x), "-Y", "0",
 		"-s", "bg=yellow,fg=black",
 		"-S", "fg=yellow", "-R", "fg=yellow",
-		"sh", "-c", `printf '\n  %s' "$1"; sleep "$2"`,
+		"sh", "-c", script,
 		"llmux-notification", message, seconds,
 	}
 	paneID, err := Run(args)
@@ -301,6 +372,14 @@ func DisplayPopup(opts DisplayPopupOptions) error {
 	if opts.Client != "" {
 		args = append(args[:1], append([]string{"-c", opts.Client}, args[1:]...)...)
 	}
-	_, err := Run(args)
-	return err
+	// display-popup returns only when the popup closes.
+	result := RunBlocking(args)
+	if result.ExitCode != 0 {
+		msg := result.Stderr
+		if msg == "" {
+			msg = result.Stdout
+		}
+		return fmt.Errorf("tmux display-popup failed with code %d: %s", result.ExitCode, msg)
+	}
+	return nil
 }

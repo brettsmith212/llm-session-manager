@@ -1,6 +1,7 @@
 package warm
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ func Warm(cwd string) error {
 		cap = 5
 	}
 
+	cwd = sessions.CanonicalPath(cwd)
 	sessionName := sessions.SessionNameForPath(cwd, prefix)
 
 	// Already exists (warm or in-use) — refresh timestamp and bail.
@@ -45,20 +47,59 @@ func Warm(cwd string) error {
 		evictWarmOnly(prefix, cap)
 	}
 
-	if err := tmux.NewSession(sessionName, cwd, agent.LaunchCommand(command)); err != nil {
+	windowID, err := tmux.Run([]string{"new-session", "-dP", "-F", "#{window_id}",
+		"-s", sessionName, "-c", cwd, agent.LaunchCommand(command)})
+	if err != nil {
 		return err
 	}
 
 	// Hide from the picker: do NOT set @llm_agent (the picker filter keys
 	// on it). Disable auto-rename so tmux doesn't relabel the window after
 	// the running command. Name the window "warm" explicitly.
-	_ = tmux.SetWindowOption(sessionName+":0", "automatic-rename", "off")
-	_ = tmux.RenameWindow(sessionName+":0", "warm")
-	_ = tmux.SetWindowOption(sessionName+":0", "@llm_warm_agent", agent.Name(command))
-	_ = tmux.SetWindowOption(sessionName+":0", "@llm_path", cwd)
-	_ = tmux.SetSessionOption(sessionName, "@llm_warmed_at",
-		strconv.FormatInt(time.Now().UnixNano(), 10))
-	return nil
+	_, err = tmux.Run(tmux.Batch(
+		tmux.SetWindowOptionArgs(windowID, "automatic-rename", "off"),
+		[]string{"rename-window", "-t", windowID, "warm"},
+		tmux.SetWindowOptionArgs(windowID, "@llm_warm_agent", agent.Name(command)),
+		tmux.SetWindowOptionArgs(windowID, "@llm_path", cwd),
+		tmux.SetSessionOptionArgs(sessionName, "@llm_warmed_at", strconv.FormatInt(time.Now().UnixNano(), 10)),
+	))
+	return err
+}
+
+// Claimed is the pre-warmed agent window that launch or add promotes.
+type Claimed struct {
+	WindowID string
+	Agent    string
+}
+
+// Claim prepares a warm-only session for promotion by launch or add and
+// returns the window already running its agent. A warm session running a
+// different agent than activeAgent is discarded instead, so the agent chosen
+// with s in the Control Room applies to every session the user opens; ok is
+// then false and the caller creates a fresh session.
+func Claim(sessionName, activeAgent string) (claimed Claimed, ok bool, err error) {
+	details, err := tmux.DisplayMessage("#{window_id}\t#{@llm_warm_agent}\t#{pane_start_command}\t#{pane_current_command}", sessionName+":")
+	if err != nil {
+		return Claimed{}, false, fmt.Errorf("failed to resolve warm window: %w", err)
+	}
+	parts := strings.SplitN(details, "\t", 4)
+	if len(parts) != 4 || parts[0] == "" {
+		return Claimed{}, false, fmt.Errorf("failed to resolve warm window: unexpected details %q", details)
+	}
+	claimed = Claimed{WindowID: parts[0], Agent: parts[1]}
+	if claimed.Agent == "" {
+		claimed.Agent = agent.Name(parts[2])
+	}
+	if claimed.Agent == "" {
+		claimed.Agent = parts[3]
+	}
+	if activeAgent != "" && claimed.Agent != "" && claimed.Agent != activeAgent {
+		if err := tmux.KillSession(sessionName); err != nil {
+			return Claimed{}, false, fmt.Errorf("failed to replace warm %s session: %w", claimed.Agent, err)
+		}
+		return Claimed{}, false, nil
+	}
+	return claimed, true, nil
 }
 
 // evictWarmOnly kills the oldest warm-only managed sessions until the pool

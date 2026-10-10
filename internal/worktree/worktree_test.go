@@ -210,6 +210,31 @@ func TestWorktreeRootUsesOptionalBaseDirectory(t *testing.T) {
 	}
 }
 
+func TestWithinMatchesTheCheckoutAndItsSubdirectories(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "task")
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "task-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{
+		root:                                   true,
+		filepath.Join(root, "src"):             true,
+		filepath.Join(link, "src"):             true,
+		filepath.Join(root, "..dotted"):        true,
+		filepath.Dir(root):                     false,
+		root + "-sibling":                      false,
+		filepath.Join(root, "..", "elsewhere"): false,
+		"":                                     false,
+	} {
+		if got := Within(path, root); got != want {
+			t.Errorf("Within(%q, %q) = %v, want %v", path, root, got, want)
+		}
+	}
+}
+
 func createTestRepository(t *testing.T) string {
 	t.Helper()
 	repository := t.TempDir()
